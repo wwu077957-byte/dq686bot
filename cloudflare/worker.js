@@ -1,10 +1,11 @@
-// dq686BOT v4 - Cloudflare Workers 版
+// dq686BOT v4.1 - Cloudflare Workers 版
 // 大脑 (可切换, 共用同一份聊天记录):
 //   DeepSeek 日常 (deepseek-chat) / DeepSeek 深度思考 (deepseek-reasoner)
 //   GPT-OSS 120B (Groq 免费) / GPT-OSS 20B (Groq 免费, 更快)
 // 看图: Groq 视觉模型 (GROQ_API_KEY); 作图: Pollinations 免费接口
 // 代码交付: 回复带按钮, 一点把代码块存成文件发送; 说"文件"或代码太长时自动发文件
-// 读链接: 发网址自动抓正文总结; 读文件: txt/md/代码/日志等文本文件发来就能读
+// 读链接: 发网址自动抓正文总结; 读文件: txt/md/代码/日志/Word(docx) 发来就能读
+// 语音: 发语音自动转文字再回答 (Groq Whisper, 与看图同一把 key)
 // 联网搜索: /s 关键词 (需 TAVILY_API_KEY, 没接时会老实说未接入)
 // GitHub: /gh 用户名/仓库名 查仓库动态
 // 每日早报: 控制台给 Worker 加 Cron 触发器 "0 0 * * *" (UTC) = 每天北京时间 08:00
@@ -30,8 +31,9 @@ const MEM_ROUNDS = 10;
 const HELP = `我是小多, 多情的私人 AI 助手。
 
 直接发消息 = 跟我聊天 (记得最近 10 轮, 换模型也不丢)
+发语音给我 = 我先转成文字, 再回答你
 发网址给我 = 我读完帮你总结
-发文件给我 = txt、代码、日志这类文件我能读懂再回答
+发文件给我 = txt、代码、日志、Word 文档这类我能读懂再回答
 /new - 清空记忆, 开新话题
 /draw 描述 - 画图, 例: /draw 一只在海边看日落的橘猫
 发图片给我 = 我帮你看图
@@ -100,7 +102,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v4)", {
+      return new Response("dq686bot is alive (cloudflare worker v4.1)", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
@@ -431,11 +433,63 @@ async function aiVision(env, imageBuf, prompt) {
   return (data.choices?.[0]?.message?.content || "").trim();
 }
 
+// ---------- 语音转文字 (Groq Whisper) ----------
+async function transcribeAudio(env, buf) {
+  const form = new FormData();
+  form.append("file", new Blob([buf], { type: "audio/ogg" }), "voice.ogg");
+  form.append("model", env.WHISPER_MODEL || "whisper-large-v3-turbo");
+  form.append("response_format", "json");
+  form.append("language", "zh");
+  const r = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.GROQ_API_KEY}` },
+    body: form,
+  });
+  if (!r.ok) throw new Error(`whisper HTTP ${r.status}`);
+  const data = await r.json();
+  return (data.text || "").trim();
+}
+
+// ---------- Word (.docx) 文本提取: docx 是 zip, 取出 document.xml 去标签 ----------
+async function extractDocxText(buf) {
+  const bytes = new Uint8Array(buf);
+  const view = new DataView(buf);
+  let off = 0;
+  let xmlBytes = null;
+  while (off + 30 <= bytes.length) {
+    if (view.getUint32(off, true) !== 0x04034b50) break;
+    const method = view.getUint16(off + 8, true);
+    const compSize = view.getUint32(off + 18, true);
+    const fnLen = view.getUint16(off + 26, true);
+    const exLen = view.getUint16(off + 28, true);
+    const name = new TextDecoder().decode(bytes.slice(off + 30, off + 30 + fnLen));
+    const dataStart = off + 30 + fnLen + exLen;
+    if (name === "word/document.xml") {
+      const comp = bytes.slice(dataStart, dataStart + compSize);
+      if (method === 8) {
+        const stream = new Blob([comp]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+        xmlBytes = new Uint8Array(await new Response(stream).arrayBuffer());
+      } else {
+        xmlBytes = comp;
+      }
+      break;
+    }
+    off = dataStart + compSize;
+  }
+  if (!xmlBytes) throw new Error("docx: document.xml not found");
+  const xml = new TextDecoder("utf-8").decode(xmlBytes);
+  return xml
+    .replace(/<\/w:p>/g, NL)
+    .replace(/<[^>]+>/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .trim();
+}
+
 async function drawImage(prompt) {
   const q = encodeURIComponent(prompt);
   const r = await fetch(
     `https://image.pollinations.ai/prompt/${q}?width=1024&height=1024&nologo=true`,
-    { headers: { "User-Agent": "dq686bot/4.0" } }
+    { headers: { "User-Agent": "dq686bot/4.1" } }
   );
   if (!r.ok) throw new Error(`draw HTTP ${r.status}`);
   return await r.arrayBuffer();
@@ -580,7 +634,7 @@ function extractFirstUrl(text) {
 
 async function fetchPageText(url) {
   const r = await fetch(url, {
-    headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 dq686bot/4.0" },
+    headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 dq686bot/4.1" },
     redirect: "follow",
   });
   if (!r.ok) throw new Error(`page HTTP ${r.status}`);
@@ -820,9 +874,54 @@ async function handleUpdate(env, update) {
     const isReplyToBot = !!replyFrom?.is_bot;
     const mentioned =
       text.toLowerCase().includes("@dq686bot") || caption.toLowerCase().includes("@dq686bot");
-    if (!(text.startsWith("/") || caption.startsWith("/") || isReplyToBot || mentioned || doc)) return;
+    if (!(text.startsWith("/") || caption.startsWith("/") || isReplyToBot || mentioned || doc || msg.voice || msg.video || msg.video_note)) return;
     text = text.replace(/@dq686BOT/g, "").replace(/@dq686bot/g, "").trim();
     caption = caption.replace(/@dq686BOT/g, "").replace(/@dq686bot/g, "").trim();
+  }
+
+  // ----- 语音: 转成文字后当作普通消息继续走 -----
+  if (msg.voice || msg.audio) {
+    const media = msg.voice || msg.audio;
+    if (!env.GROQ_API_KEY) {
+      await sendText(env, chatId, "语音转文字还没接上 key, 找多情/Algo 处理。", msg.message_id);
+      return;
+    }
+    if (media.duration && media.duration > 600) {
+      await sendText(env, chatId, "这条语音太长了 (超过 10 分钟), 拆短一点发我。", msg.message_id);
+      return;
+    }
+    if (media.file_size && media.file_size > 20 * 1024 * 1024) {
+      await sendText(env, chatId, "这条语音文件太大了, 我听不了。", msg.message_id);
+      return;
+    }
+    await tg(env, "sendChatAction", { chat_id: chatId, action: "typing" });
+    const phId = await sendPlaceholder(env, chatId, "🎙️ 小多正在听你说话…", msg.message_id);
+    try {
+      const info = await tg(env, "getFile", { file_id: media.file_id });
+      const filePath = info?.result?.file_path;
+      const fr = await fetch(`https://api.telegram.org/file/bot${env.BOT_TOKEN}/${filePath}`);
+      const buf = await fr.arrayBuffer();
+      const heard = await transcribeAudio(env, buf);
+      if (!heard) throw new Error("empty transcript");
+      await editOrSend(env, chatId, phId, `🎙️ 你说的是:「${heard}」`, undefined, false);
+      text = heard;
+      // 不 return: 转成的文字继续走后面的普通消息流程 (聊天/画图等待/读链接)
+    } catch (e) {
+      console.log("voice err", e);
+      await editOrSend(env, chatId, phId, "没听清这条语音, 再说一次, 或者打字发我。", undefined, false);
+      return;
+    }
+  }
+
+  // ----- 视频: 暂时处理不了, 老实说明 -----
+  if (msg.video || msg.video_note || msg.animation) {
+    await sendText(
+      env,
+      chatId,
+      "视频我暂时还处理不了。你把里面的话单独发条语音给我, 或者截个图发我, 我都能接住。",
+      msg.message_id
+    );
+    return;
   }
 
   // ----- 文件阅读 -----
@@ -830,12 +929,13 @@ async function handleUpdate(env, update) {
     const name = doc.file_name || "file";
     const ext = name.includes(".") ? name.split(".").pop().toLowerCase() : "";
     const mime = (doc.mime_type || "").toLowerCase();
+    const isDocx = ext === "docx";
     const isText = TEXT_EXTS.includes(ext) || mime.startsWith("text/");
-    if (!isText) {
+    if (!isText && !isDocx) {
       await sendText(
         env,
         chatId,
-        `这个文件 (${name}) 我暂时读不了。我现在能读的是 txt、md、代码、日志这类文本文件; PDF、Word、压缩包还不行。你可以把内容复制成文字发我, 一样能聊。`,
+        `这个文件 (${name}) 我暂时读不了。我现在能读的是 txt、md、代码、日志这类文本文件, 还有 Word 文档 (.docx); PDF、压缩包还不行。PDF 你可以把要看的那页截图发我, 或者把内容复制成文字发我。`,
         msg.message_id
       );
       return;
@@ -855,7 +955,10 @@ async function handleUpdate(env, update) {
       const filePath = info?.result?.file_path;
       const fr = await fetch(`https://api.telegram.org/file/bot${env.BOT_TOKEN}/${filePath}`);
       const buf = await fr.arrayBuffer();
-      const content = new TextDecoder("utf-8").decode(buf).slice(0, 15000);
+      const content = isDocx
+        ? (await extractDocxText(buf)).slice(0, 15000)
+        : new TextDecoder("utf-8").decode(buf).slice(0, 15000);
+      if (!content.trim()) throw new Error("empty doc");
       const ask = caption || "帮我总结这个文件的要点";
       const prompt = [
         `我给你发了一个文件「${name}」, 内容如下:`,
