@@ -1,17 +1,19 @@
-// dq686BOT v2 - Cloudflare Workers 版
-// 双大脑: DeepSeek (官方 key, 默认) + Groq (免费, 备用/看图)
-//   聊天: 按用户选择切换, /model 或按钮切换, 选择存 KV
-//   看图: Groq 视觉模型 (GROQ_API_KEY)
-//   作图: Pollinations 免费接口
-// 存储: KV (绑定名 BOT_KV) 存会话记忆/白名单主人/每日计数/模型选择; 未绑定时降级
+// dq686BOT v3 - Cloudflare Workers 版
+// 大脑 (可切换, 共用同一份聊天记录):
+//   DeepSeek 日常 (deepseek-chat) / DeepSeek 深度思考 (deepseek-reasoner)
+//   GPT-OSS 120B (Groq 免费) / GPT-OSS 20B (Groq 免费, 更快)
+// 看图: Groq 视觉模型 (GROQ_API_KEY)
+// 作图: Pollinations 免费接口
+// 代码交付: 回复带按钮, 一点把代码块存成文件发送; 用户说"文件"或代码太长时自动发文件
+// 存储: KV (绑定名 BOT_KV) 存会话记忆/白名单主人/每日计数/模型选择/最近代码
 //
 // 环境变量 (在 Workers 设置里填, 不要写进代码):
 //   BOT_TOKEN        必需, BotFather 的 token (密钥)
 //   DEEPSEEK_API_KEY DeepSeek 官方 key (密钥); 有它默认大脑就是 DeepSeek
 //   GROQ_API_KEY     Groq 的 key (密钥); Groq 聊天 + 看图用
 //   ALLOWED_IDS      可选, 逗号分隔的 Telegram 数字 ID; 空 = 第一个 /start 的人临时认主
-//   DEEPSEEK_MODEL   可选, 默认 deepseek-chat
-//   GROQ_MODEL       可选, 默认 openai/gpt-oss-120b (也兼容旧变量名 AI_MODEL)
+//   DEEPSEEK_MODEL   可选, 覆盖 DeepSeek 日常模型名, 默认 deepseek-chat
+//   GROQ_MODEL       可选, 覆盖 GPT-OSS 120B 模型名 (也兼容旧变量名 AI_MODEL)
 //   VISION_MODEL     可选, 默认 meta-llama/llama-4-scout-17b-16e-instruct
 //   WEBHOOK_SECRET   可选, 默认 dq686hook (webhook 路径)
 // 部署后打开 https://<你的worker地址>/<WEBHOOK_SECRET>/setwebhook 注册 webhook
@@ -23,15 +25,16 @@ const MEM_ROUNDS = 10;
 
 const HELP = `我是小多, 多情的私人 AI 助手。
 
-直接发消息 = 跟我聊天 (记得最近 10 轮)
+直接发消息 = 跟我聊天 (记得最近 10 轮, 换模型也不丢)
 /new - 清空记忆, 开新话题
 /draw 描述 - 画图, 例: /draw 一只在海边看日落的橘猫
 发图片给我 = 我帮你看图
-/model - 切换大脑 (DeepSeek / Groq)
+/model - 切换大脑 (DeepSeek 日常 / 深度思考 / GPT-OSS 两个档)
 /myid - 查看你的 Telegram 数字 ID
 /help - 这份说明
 
-也可以点下面的按钮, 不用打命令。`;
+写代码时, 点回复下面的按钮, 我能把代码存成文件发你。
+也可以点菜单按钮, 不用打命令。`;
 
 const MENU_KB = {
   inline_keyboard: [
@@ -49,12 +52,22 @@ const MENU_KB = {
 const MODEL_KB = {
   inline_keyboard: [
     [
-      { text: "🧠 DeepSeek", callback_data: "b:deepseek" },
-      { text: "⚡ Groq 免费", callback_data: "b:groq" },
+      { text: "🧠 DeepSeek 日常", callback_data: "b:deepseek" },
+      { text: "🤔 DeepSeek 深度思考", callback_data: "b:deepseek-pro" },
+    ],
+    [
+      { text: "⚡ GPT-OSS 120B", callback_data: "b:gptoss" },
+      { text: "🚀 GPT-OSS 20B", callback_data: "b:gptoss20" },
     ],
     [{ text: "↩️ 返回菜单", callback_data: "m:menu" }],
   ],
 };
+
+const FILE_KB = {
+  inline_keyboard: [[{ text: "📄 把代码存成文件发我", callback_data: "f:file" }]],
+};
+
+const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20"];
 
 function systemPrompt(brainLabel) {
   return [
@@ -73,7 +86,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v2)", {
+      return new Response("dq686bot is alive (cloudflare worker v3)", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
@@ -111,7 +124,7 @@ async function tg(env, method, payload) {
   }
 }
 
-async function sendText(env, chatId, text, replyTo, replyMarkup) {
+async function sendText(env, chatId, text, replyTo, replyMarkup, useMd) {
   const body = text || "(空回复)";
   const chunks = [];
   let rest = body;
@@ -127,6 +140,11 @@ async function sendText(env, chatId, text, replyTo, replyMarkup) {
     const payload = { chat_id: chatId, text: chunks[i] };
     if (replyTo && i === 0) payload.reply_to_message_id = replyTo;
     if (replyMarkup && i === chunks.length - 1) payload.reply_markup = replyMarkup;
+    if (useMd) {
+      const res = await tg(env, "sendMessage", { ...payload, parse_mode: "Markdown" });
+      if (res && res.ok) continue;
+      // Markdown 解析失败就用纯文本重发这一段
+    }
     await tg(env, "sendMessage", payload);
   }
 }
@@ -144,6 +162,27 @@ async function sendPhoto(env, chatId, bytes, caption) {
     return await r.json();
   } catch (e) {
     console.log("sendPhoto failed", e);
+    return null;
+  }
+}
+
+async function sendDocument(env, chatId, content, filename, caption) {
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  if (caption) form.append("caption", caption.slice(0, 1000));
+  form.append(
+    "document",
+    new Blob([content], { type: "text/plain; charset=utf-8" }),
+    filename
+  );
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, {
+      method: "POST",
+      body: form,
+    });
+    return await r.json();
+  } catch (e) {
+    console.log("sendDocument failed", e);
     return null;
   }
 }
@@ -197,33 +236,51 @@ async function quotaTake(env, userId) {
   return true;
 }
 
-// ---------- 双大脑 ----------
+// ---------- 大脑 (四档可切换) ----------
 function brainConfig(env, brain) {
-  if (brain === "deepseek") {
-    return {
-      id: "deepseek",
-      label: "DeepSeek",
-      base: (env.DEEPSEEK_BASE_URL || "https://api.deepseek.com").replace(/\/+$/, ""),
-      model: env.DEEPSEEK_MODEL || "deepseek-chat",
-      key: env.DEEPSEEK_API_KEY || "",
-    };
+  const dsBase = (env.DEEPSEEK_BASE_URL || "https://api.deepseek.com").replace(/\/+$/, "");
+  const gqBase = "https://api.groq.com/openai/v1";
+  switch (brain) {
+    case "deepseek":
+      return {
+        id: "deepseek",
+        label: "DeepSeek 日常",
+        base: dsBase,
+        model: env.DEEPSEEK_MODEL || "deepseek-chat",
+        key: env.DEEPSEEK_API_KEY || "",
+      };
+    case "deepseek-pro":
+      return {
+        id: "deepseek-pro",
+        label: "DeepSeek 深度思考",
+        base: dsBase,
+        model: env.DEEPSEEK_PRO_MODEL || "deepseek-reasoner",
+        key: env.DEEPSEEK_API_KEY || "",
+      };
+    case "gptoss20":
+      return {
+        id: "gptoss20",
+        label: "GPT-OSS 20B (Groq 免费)",
+        base: gqBase,
+        model: "openai/gpt-oss-20b",
+        key: env.GROQ_API_KEY || "",
+      };
+    default:
+      return {
+        id: "gptoss",
+        label: "GPT-OSS 120B (Groq 免费)",
+        base: gqBase,
+        model: env.GROQ_MODEL || env.AI_MODEL || "openai/gpt-oss-120b",
+        key: env.GROQ_API_KEY || "",
+      };
   }
-  return {
-    id: "groq",
-    label: "GPT-OSS 120B (Groq 免费)",
-    base: "https://api.groq.com/openai/v1",
-    model: env.GROQ_MODEL || env.AI_MODEL || "openai/gpt-oss-120b",
-    key: env.GROQ_API_KEY || "",
-  };
 }
 
 async function getBrain(env, chatId) {
   const saved = await kvGet(env, `brain:${chatId}`);
-  if (saved === "deepseek" || saved === "groq") {
-    if (brainConfig(env, saved).key) return saved;
-  }
+  if (BRAIN_IDS.includes(saved) && brainConfig(env, saved).key) return saved;
   if (env.DEEPSEEK_API_KEY) return "deepseek";
-  return "groq";
+  return "gptoss";
 }
 
 async function aiChat(env, chatId, userText) {
@@ -231,11 +288,11 @@ async function aiChat(env, chatId, userText) {
   let cfg = brainConfig(env, brain);
   let fellBack = false;
   if (!cfg.key) {
-    const other = brain === "deepseek" ? "groq" : "deepseek";
-    const alt = brainConfig(env, other);
-    if (alt.key) {
-      brain = other;
-      cfg = alt;
+    const order = ["deepseek", "gptoss", "gptoss20", "deepseek-pro"];
+    const altId = order.find((id) => id !== brain && brainConfig(env, id).key);
+    if (altId) {
+      brain = altId;
+      cfg = brainConfig(env, altId);
       fellBack = true;
     } else {
       throw new Error("no ai key configured");
@@ -274,7 +331,7 @@ async function aiChat(env, chatId, userText) {
   history.push({ role: "user", content: userText }, { role: "assistant", content: reply });
   while (history.length > MEM_ROUNDS * 2) history.shift();
   await kvPut(env, `mem:${chatId}`, JSON.stringify(history), 60 * 60 * 24 * 7);
-  if (fellBack) reply += `${NL}${NL}(先用 ${cfg.label} 回你, 另一个大脑还没接好)`;
+  if (fellBack) reply += `${NL}${NL}(先用 ${cfg.label} 回你, 你选的那个大脑还没接好)`;
   return reply;
 }
 
@@ -319,7 +376,7 @@ async function drawImage(prompt) {
   const q = encodeURIComponent(prompt);
   const r = await fetch(
     `https://image.pollinations.ai/prompt/${q}?width=1024&height=1024&nologo=true`,
-    { headers: { "User-Agent": "dq686bot/2.0" } }
+    { headers: { "User-Agent": "dq686bot/3.0" } }
   );
   if (!r.ok) throw new Error(`draw HTTP ${r.status}`);
   return await r.arrayBuffer();
@@ -349,18 +406,72 @@ async function doDraw(env, chatId, userId, prompt, replyTo) {
   }
 }
 
+// ---------- 代码块 -> 文件 ----------
+function extractBlocks(text) {
+  const blocks = [];
+  const lines = String(text).split(NL);
+  let cur = null;
+  for (const line of lines) {
+    const t = line.trimStart();
+    if (t.startsWith("```")) {
+      if (cur) {
+        blocks.push(cur);
+        cur = null;
+      } else {
+        cur = { lang: t.slice(3).trim().toLowerCase(), lines: [] };
+      }
+    } else if (cur) {
+      cur.lines.push(line);
+    }
+  }
+  if (cur) blocks.push(cur);
+  return blocks
+    .map((b) => ({ lang: b.lang, code: b.lines.join(NL).trim() }))
+    .filter((b) => b.code.length > 0);
+}
+
+function filenameFor(block, idx, total) {
+  const lang = (block.lang || "").replace(/[^a-z0-9]/g, "");
+  const map = {
+    html: ["index", "html"],
+    python: ["main", "py"],
+    py: ["main", "py"],
+    javascript: ["script", "js"],
+    js: ["script", "js"],
+    css: ["style", "css"],
+    json: ["data", "json"],
+    typescript: ["main", "ts"],
+    ts: ["main", "ts"],
+    bash: ["script", "sh"],
+    shell: ["script", "sh"],
+    sh: ["script", "sh"],
+  };
+  const hit = map[lang];
+  const base = hit ? hit[0] : "code";
+  const ext = hit ? hit[1] : lang && lang.length <= 5 ? lang : "txt";
+  return total > 1 ? `${base}${idx + 1}.${ext}` : `${base}.${ext}`;
+}
+
+async function sendBlocksAsFiles(env, chatId, blocks) {
+  for (let i = 0; i < blocks.length; i++) {
+    const name = filenameFor(blocks[i], i, blocks.length);
+    await sendDocument(env, chatId, blocks[i].code, name, `📄 ${name}`);
+  }
+}
+
 async function sendModelPicker(env, chatId) {
   const brain = await getBrain(env, chatId);
   const label = brainConfig(env, brain).label;
-  const dsState = env.DEEPSEEK_API_KEY ? "已接入" : "未接入";
-  const gqState = env.GROQ_API_KEY ? "已接入" : "未接入";
+  const st = (id) => (brainConfig(env, id).key ? "已接入" : "未接入");
   const text = [
     `当前大脑: ${label}`,
     "",
-    `🧠 DeepSeek (${dsState}) - 中文强, 用你 DeepSeek 账号的余额`,
-    `⚡ Groq 免费 (${gqState}) - GPT-OSS 120B, 免费, 速度快`,
+    `🧠 DeepSeek 日常 (${st("deepseek")}) - 中文强, 快问快答`,
+    `🤔 DeepSeek 深度思考 (${st("deepseek-pro")}) - 难题慢慢想, 用同一份余额`,
+    `⚡ GPT-OSS 120B (${st("gptoss")}) - Groq 免费, 均衡`,
+    `🚀 GPT-OSS 20B (${st("gptoss20")}) - Groq 免费, 最快`,
     "",
-    "点按钮切换, 选好立刻生效:",
+    "切换不丢聊天记录, 点按钮立刻生效:",
   ].join(NL);
   await sendText(env, chatId, text, undefined, MODEL_KB);
 }
@@ -368,7 +479,7 @@ async function sendModelPicker(env, chatId) {
 async function setBrain(env, chatId, brain) {
   await kvPut(env, `brain:${chatId}`, brain);
   const label = brainConfig(env, brain).label;
-  await sendText(env, chatId, `好, 大脑切到 ${label} 了, 继续聊吧。`, undefined, MENU_KB);
+  await sendText(env, chatId, `好, 大脑切到 ${label} 了, 聊天记录照旧, 继续聊吧。`, undefined, MENU_KB);
 }
 
 // ---------- 按钮回调 ----------
@@ -392,8 +503,24 @@ async function handleCallback(env, cq) {
     await sendText(env, chatId, "想画啥? 直接发一句描述给我就行, 比如: 一只在海边看日落的橘猫");
   } else if (data === "m:model") {
     await sendModelPicker(env, chatId);
-  } else if (data === "b:deepseek" || data === "b:groq") {
-    const brain = data === "b:deepseek" ? "deepseek" : "groq";
+  } else if (data === "f:file") {
+    const raw = await kvGet(env, `lastcode:${chatId}`);
+    let blocks = [];
+    if (raw) {
+      try {
+        blocks = JSON.parse(raw);
+      } catch {
+        blocks = [];
+      }
+    }
+    if (!blocks.length) {
+      await sendText(env, chatId, "最近没有能存的代码, 先让我写一段再点这个按钮。");
+      return;
+    }
+    await sendBlocksAsFiles(env, chatId, blocks);
+  } else if (data.startsWith("b:")) {
+    const brain = data.slice(2);
+    if (!BRAIN_IDS.includes(brain)) return;
     if (!brainConfig(env, brain).key) {
       await sendText(env, chatId, "这个大脑还没接入 (缺 key), 先用现在这个吧。");
       return;
@@ -474,7 +601,7 @@ async function handleUpdate(env, update) {
       const buf = await fr.arrayBuffer();
       const prompt = caption || "用中文详细描述并解释这张图片的内容。";
       const answer = await aiVision(env, buf, prompt);
-      await sendText(env, chatId, answer, msg.message_id);
+      await sendText(env, chatId, answer, msg.message_id, undefined, true);
     } catch (e) {
       console.log("vision err", e);
       await sendText(env, chatId, "看图时出了点问题, 稍后再发一次试试。");
@@ -499,12 +626,14 @@ async function handleUpdate(env, update) {
   }
   if (text.startsWith("/model")) {
     const arg = text.slice("/model".length).trim().toLowerCase();
-    if (arg === "deepseek" || arg === "groq") {
-      if (!brainConfig(env, arg).key) {
+    const alias = { ds: "deepseek", pro: "deepseek-pro", reasoner: "deepseek-pro", groq: "gptoss", gpt: "gptoss", fast: "gptoss20" };
+    const target = BRAIN_IDS.includes(arg) ? arg : alias[arg];
+    if (target) {
+      if (!brainConfig(env, target).key) {
         await sendText(env, chatId, "这个大脑还没接入 (缺 key), 先用现在这个吧。");
         return;
       }
-      await setBrain(env, chatId, arg);
+      await setBrain(env, chatId, target);
       return;
     }
     await sendModelPicker(env, chatId);
@@ -516,7 +645,7 @@ async function handleUpdate(env, update) {
       await sendText(env, chatId, "画啥? 格式: /draw 一只在海边看日落的橘猫");
       return;
     }
-    await doDraw(env, chatId, userId, prompt, undefined);
+    await doDraw(env, chatId, userId, prompt, msg.message_id);
     return;
   }
   if (text.startsWith("/")) {
@@ -528,7 +657,7 @@ async function handleUpdate(env, update) {
   const awaiting = await kvGet(env, `awaitdraw:${chatId}`);
   if (awaiting) {
     if (env.BOT_KV) await env.BOT_KV.delete(`awaitdraw:${chatId}`);
-    await doDraw(env, chatId, userId, text, undefined);
+    await doDraw(env, chatId, userId, text, msg.message_id);
     return;
   }
 
@@ -539,13 +668,26 @@ async function handleUpdate(env, update) {
   await tg(env, "sendChatAction", { chat_id: chatId, action: "typing" });
   try {
     const reply = await aiChat(env, chatId, text);
-    await sendText(env, chatId, reply, chatType !== "private" ? msg.message_id : undefined);
+    const blocks = extractBlocks(reply);
+    let markup;
+    if (blocks.length) {
+      await kvPut(env, `lastcode:${chatId}`, JSON.stringify(blocks), 60 * 60);
+      const wantFile = text.includes("文件");
+      const huge = blocks.some((b) => b.code.length > 3000);
+      if (wantFile || huge) {
+        await sendText(env, chatId, reply, msg.message_id, undefined, true);
+        await sendBlocksAsFiles(env, chatId, blocks);
+        return;
+      }
+      markup = FILE_KB;
+    }
+    await sendText(env, chatId, reply, msg.message_id, markup, true);
   } catch (e) {
     console.log("chat err", e);
     if (e.status === 401) {
       await sendText(env, chatId, "大脑的 key 验不过 (401), 找 Algo 查。");
     } else if (e.status === 402) {
-      await sendText(env, chatId, "DeepSeek 余额不足了。可以点 🧠 换模型 切到 Groq 免费版先用着。", undefined, MODEL_KB);
+      await sendText(env, chatId, "DeepSeek 余额不足了。点 🧠 换模型 切到 Groq 免费版先用着。", undefined, MODEL_KB);
     } else if (e.status === 429) {
       await sendText(env, chatId, "问太快被限流了, 等一分钟再试。");
     } else {
