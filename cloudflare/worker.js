@@ -63,6 +63,7 @@ const HELP = `我是小多, 多情的私人 AI 助手。
 /export - 导出我的记忆和聊天记录
 /incognito - 假装失忆模式开关 (不读不存记忆)
 /status - 我的状态卡
+/music 歌名 - 搜歌点歌 (点结果里的数字就发歌; 也可直接说 放+歌名)
 /morning - 今日早报
 /myid - 我的 Telegram 数字 ID
 
@@ -76,20 +77,21 @@ const MENU_KB = {
     ],
     [
       { text: "🧠 换模型", callback_data: "m:model" },
+      { text: "🎵 音乐", callback_data: "m:music" },
+    ],
+    [
       { text: "🔍 搜索", callback_data: "m:search" },
-    ],
-    [
       { text: "☀️ 今日早报", callback_data: "m:morning" },
+    ],
+    [
       { text: "🐙 查仓库", callback_data: "m:gh" },
-    ],
-    [
       { text: "🎭 人设", callback_data: "m:persona" },
-      { text: "📝 我的记忆", callback_data: "m:memory" },
     ],
     [
+      { text: "📝 我的记忆", callback_data: "m:memory" },
       { text: "❓ 帮助", callback_data: "m:help" },
-      { text: "🆔 我的ID", callback_data: "m:myid" },
     ],
+    [{ text: "🆔 我的ID", callback_data: "m:myid" }],
   ],
 };
 
@@ -1346,6 +1348,108 @@ async function statusText(env, chatId, userId) {
   ].join(NL);
 }
 
+
+// ---------- 音乐点歌 (网易云搜索 + 源站音频直发) ----------
+const MUSIC_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1";
+
+function parseSongAsk(text) {
+  const m = text.match(/^(?:放一首|播放|放|来一首|点歌|点一首|听一首|我想听|我要听|唱一首)[\s:：]*(.+)$/);
+  if (!m) return null;
+  const q = m[1].trim().replace(/[。！!]+$/, "");
+  if (!q || q.length > 40) return null;
+  if (/[吗呢？?]/.test(q) || q.includes("什么")) return null;
+  return q;
+}
+
+async function musicSearch(query) {
+  const url = "https://music.163.com/api/cloudsearch/pc?s=" + encodeURIComponent(query) + "&type=1&limit=10&offset=0";
+  const r = await fetch(url, { headers: { "User-Agent": MUSIC_UA, Referer: "https://music.163.com" } });
+  if (!r.ok) throw new Error("search http " + r.status);
+  const d = await r.json();
+  const songs = d?.result?.songs || [];
+  return songs.map((s) => ({
+    id: String(s.id),
+    name: s.name || "",
+    artist: (s.ar || []).map((a) => a.name).join("/"),
+    dur: Math.round((s.dt || 0) / 1000),
+  }));
+}
+
+async function doMusicSearch(env, chatId, userId, query, replyTo) {
+  await tg(env, "sendChatAction", { chat_id: chatId, action: "typing" });
+  let list = [];
+  try {
+    list = await musicSearch(query);
+  } catch (e) {
+    console.log("music search err", e);
+    await sendText(env, chatId, "音乐源站这会儿连不上, 等下再试。", replyTo);
+    return;
+  }
+  if (!list.length) {
+    await sendText(env, chatId, `没搜到「${query}」, 换个名字试试。`, replyTo);
+    return;
+  }
+  const cache = {};
+  for (const s of list) cache[s.id] = s;
+  await kvPut(env, `musq:${chatId}`, JSON.stringify(cache), 1800);
+  const lines = [`🎯 搜「${query}」找到这些, 点下面的数字按钮, 就发歌给你听:`];
+  list.forEach((s, i) => {
+    const mm = Math.floor(s.dur / 60);
+    const ss = String(s.dur % 60).padStart(2, "0");
+    lines.push(`${i + 1}. ${s.name} - ${s.artist} (${mm}:${ss})`);
+  });
+  const rows = [];
+  for (let i = 0; i < list.length; i += 5) {
+    rows.push(list.slice(i, i + 5).map((s, j) => ({ text: String(i + j + 1), callback_data: "mus:" + s.id })));
+  }
+  rows.push([{ text: "🏠 菜单", callback_data: "m:menu" }]);
+  await sendText(env, chatId, lines.join(NL), replyTo, { inline_keyboard: rows });
+}
+
+async function doMusicPlay(env, chatId, songId) {
+  let info = null;
+  const raw = await kvGet(env, `musq:${chatId}`);
+  if (raw) {
+    try {
+      info = JSON.parse(raw)[songId] || null;
+    } catch {
+      info = null;
+    }
+  }
+  const name = info?.name || "未知歌曲";
+  const artist = info?.artist || "";
+  await tg(env, "sendChatAction", { chat_id: chatId, action: "upload_voice" });
+  const src = "https://music.163.com/song/media/outer/url?id=" + songId + ".mp3";
+  let buf = null;
+  let ctype = "";
+  try {
+    const r = await fetch(src, { headers: { "User-Agent": MUSIC_UA } });
+    ctype = r.headers.get("content-type") || "";
+    if (r.ok) buf = await r.arrayBuffer();
+  } catch (e) {
+    console.log("music fetch err", e);
+  }
+  if (!buf || !/audio|octet-stream/i.test(ctype) || buf.byteLength < 20000) {
+    await sendText(env, chatId, `《${name}》这首源站不给放 (多半是版权限制), 点别的试试。`);
+    return;
+  }
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  form.append("title", name.slice(0, 60));
+  if (artist) form.append("performer", artist.slice(0, 60));
+  if (info?.dur) form.append("duration", String(info.dur));
+  form.append("caption", `🎵 ${name}${artist ? " - " + artist : ""}`);
+  form.append("audio", new Blob([buf], { type: "audio/mpeg" }), `${name} - ${artist}.mp3`.slice(0, 80));
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendAudio`, { method: "POST", body: form });
+    const j = await r.json();
+    if (!j.ok) throw new Error("tg sendAudio " + (j.description || r.status));
+  } catch (e) {
+    console.log("sendAudio err", e);
+    await sendText(env, chatId, `《${name}》传给你的时候出错了, 再点一次试试。`);
+  }
+}
+
 // ---------- 按钮回调 ----------
 async function handleCallback(env, cq) {
   const chatId = cq.message?.chat?.id;
@@ -1377,6 +1481,11 @@ async function handleCallback(env, cq) {
   } else if (data === "m:gh") {
     await kvPut(env, `awaitgh:${chatId}`, "1", 300);
     await sendText(env, chatId, "想查哪个仓库? 发我 用户名/仓库名, 比如 wwu077957-byte/dq686bot");
+  } else if (data === "m:music") {
+    await kvPut(env, `awaitmusic:${chatId}`, "1", 300);
+    await sendText(env, chatId, "想听啥? 直接发歌名给我, 比如: 入戏太深");
+  } else if (data.startsWith("mus:")) {
+    await doMusicPlay(env, chatId, data.slice(4));
   } else if (data === "m:morning") {
     await sendText(env, chatId, await briefingText(env, chatId));
   } else if (data === "m:myid") {
@@ -1690,6 +1799,17 @@ async function handleUpdate(env, update) {
     await doDraw(env, chatId, userId, prompt, msg.message_id);
     return;
   }
+  if (text === "/music" || text.startsWith("/music ")) {
+    const q = text.slice(6).trim();
+    if (!q) {
+      await kvPut(env, `awaitmusic:${chatId}`, "1", 300);
+      await sendText(env, chatId, "想听啥? 直接发歌名给我, 比如: 入戏太深", msg.message_id);
+      return;
+    }
+    await doMusicSearch(env, chatId, userId, q, msg.message_id);
+    return;
+  }
+
   if (text.startsWith("/remember")) {
     const content = text.slice("/remember".length).trim();
     if (!content) {
@@ -1956,6 +2076,21 @@ async function handleUpdate(env, update) {
       console.log("gh err", e);
       await sendText(env, chatId, "没查到这个仓库。格式是 用户名/仓库名, 仓库得是公开的。", msg.message_id);
     }
+    return;
+  }
+
+  // 音乐按钮的后续: 等歌名中
+  const awaitMusic = await kvGet(env, `awaitmusic:${chatId}`);
+  if (awaitMusic) {
+    if (env.BOT_KV) await env.BOT_KV.delete(`awaitmusic:${chatId}`);
+    await doMusicSearch(env, chatId, userId, text, msg.message_id);
+    return;
+  }
+
+  // 自然语言点歌: 放/来一首/听 + 歌名
+  const songAsk = parseSongAsk(text);
+  if (songAsk) {
+    await doMusicSearch(env, chatId, userId, songAsk, msg.message_id);
     return;
   }
 
