@@ -1,0 +1,9 @@
+name = "dq686bot"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# 说明:
+# - BOT_KV 绑定请在 Cloudflare 控制台 Settings -> Bindings 里添加 (KV Namespace 现场新建),
+#   绑定名必须叫 BOT_KV。没绑也能跑, 只是没有会话记忆和额度计数。
+# - BOT_TOKEN / GROQ_API_KEY 等密钥在控制台 Settings -> Variables and Secrets 里填,
+#   不要写进这个文件。
