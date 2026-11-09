@@ -1,4 +1,4 @@
-// dq686BOT v4.1 - Cloudflare Workers 版
+// dq686BOT v4.2 - Cloudflare Workers 版
 // 大脑 (可切换, 共用同一份聊天记录):
 //   DeepSeek 日常 (deepseek-chat) / DeepSeek 深度思考 (deepseek-reasoner)
 //   GPT-OSS 120B (Groq 免费) / GPT-OSS 20B (Groq 免费, 更快)
@@ -55,7 +55,15 @@ const MENU_KB = {
     ],
     [
       { text: "🧠 换模型", callback_data: "m:model" },
+      { text: "🔍 搜索", callback_data: "m:search" },
+    ],
+    [
+      { text: "☀️ 今日早报", callback_data: "m:morning" },
+      { text: "🐙 查仓库", callback_data: "m:gh" },
+    ],
+    [
       { text: "❓ 帮助", callback_data: "m:help" },
+      { text: "🆔 我的ID", callback_data: "m:myid" },
     ],
   ],
 };
@@ -75,7 +83,10 @@ const MODEL_KB = {
 };
 
 const FILE_KB = {
-  inline_keyboard: [[{ text: "📄 把代码存成文件发我", callback_data: "f:file" }]],
+  inline_keyboard: [
+    [{ text: "📄 把代码存成文件发我", callback_data: "f:file" }],
+    [{ text: "🏠 菜单", callback_data: "m:menu" }],
+  ],
 };
 
 const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20"];
@@ -102,7 +113,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v4.1)", {
+      return new Response("dq686bot is alive (cloudflare worker v4.2)", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
@@ -489,7 +500,7 @@ async function drawImage(prompt) {
   const q = encodeURIComponent(prompt);
   const r = await fetch(
     `https://image.pollinations.ai/prompt/${q}?width=1024&height=1024&nologo=true`,
-    { headers: { "User-Agent": "dq686bot/4.1" } }
+    { headers: { "User-Agent": "dq686bot/4.2" } }
   );
   if (!r.ok) throw new Error(`draw HTTP ${r.status}`);
   return await r.arrayBuffer();
@@ -634,7 +645,7 @@ function extractFirstUrl(text) {
 
 async function fetchPageText(url) {
   const r = await fetch(url, {
-    headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 dq686bot/4.1" },
+    headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 dq686bot/4.2" },
     redirect: "follow",
   });
   if (!r.ok) throw new Error(`page HTTP ${r.status}`);
@@ -675,6 +686,36 @@ async function tavilySearch(env, query) {
     [`${i + 1}. ${it.title || ""}`, (it.content || "").slice(0, 400), it.url || ""].join(NL)
   );
   return items.join(NL + NL);
+}
+
+async function doSearch(env, chatId, userId, q, replyTo) {
+  if (!(await quotaTake(env, userId))) {
+    await sendText(env, chatId, "今天的 AI 额度用完了, 明天再来。");
+    return;
+  }
+  await tg(env, "sendChatAction", { chat_id: chatId, action: "typing" });
+  const phId = await sendPlaceholder(env, chatId, "🔍 小多正在联网搜索…", replyTo);
+  try {
+    const results = await tavilySearch(env, q);
+    if (!results) {
+      await editOrSend(env, chatId, phId, "没搜到什么有用的结果, 换个关键词试试。", undefined, false);
+      return;
+    }
+    const prompt = [
+      "请根据下面的联网搜索结果, 回答我的问题。",
+      `问题: ${q}`,
+      "",
+      "搜索结果:",
+      results,
+      "",
+      "要求: 用中文回答, 关键事实后面附上来源链接。",
+    ].join(NL);
+    const reply = await aiChat(env, chatId, prompt, `（联网搜索: ${q}）`);
+    await deliverAiReply(env, chatId, phId, reply, q);
+  } catch (e) {
+    console.log("search err", e);
+    await editOrSend(env, chatId, phId, "搜索的时候出了点问题, 稍后再试。", undefined, false);
+  }
 }
 
 // ---------- GitHub 仓库动态 ----------
@@ -798,6 +839,20 @@ async function handleCallback(env, cq) {
     await sendText(env, chatId, "想画啥? 直接发一句描述给我就行, 比如: 一只在海边看日落的橘猫");
   } else if (data === "m:model") {
     await sendModelPicker(env, chatId);
+  } else if (data === "m:search") {
+    if (!env.TAVILY_API_KEY) {
+      await sendText(env, chatId, "联网搜索还没接入: 需要一把 Tavily 的免费 key (找 Algo 带你注册)。");
+      return;
+    }
+    await kvPut(env, `awaitsearch:${chatId}`, "1", 300);
+    await sendText(env, chatId, "想搜啥? 直接发关键词给我, 比如: 今天有什么 AI 新闻");
+  } else if (data === "m:gh") {
+    await kvPut(env, `awaitgh:${chatId}`, "1", 300);
+    await sendText(env, chatId, "想查哪个仓库? 发我 用户名/仓库名, 比如 wwu077957-byte/dq686bot");
+  } else if (data === "m:morning") {
+    await sendText(env, chatId, await composeBriefing());
+  } else if (data === "m:myid") {
+    await sendText(env, chatId, `你的 Telegram 数字 ID 是: ${userId}`);
   } else if (data === "f:file") {
     const raw = await kvGet(env, `lastcode:${chatId}`);
     let blocks = [];
@@ -1063,33 +1118,7 @@ async function handleUpdate(env, update) {
       await sendText(env, chatId, "联网搜索还没接入: 需要一把 Tavily 的免费 key (找 Algo 带你注册)。先用着其他功能吧。");
       return;
     }
-    if (!(await quotaTake(env, userId))) {
-      await sendText(env, chatId, "今天的 AI 额度用完了, 明天再来。");
-      return;
-    }
-    await tg(env, "sendChatAction", { chat_id: chatId, action: "typing" });
-    const phId = await sendPlaceholder(env, chatId, "🔍 小多正在联网搜索…", msg.message_id);
-    try {
-      const results = await tavilySearch(env, q);
-      if (!results) {
-        await editOrSend(env, chatId, phId, "没搜到什么有用的结果, 换个关键词试试。", undefined, false);
-        return;
-      }
-      const prompt = [
-        `请根据下面的联网搜索结果, 回答我的问题。`,
-        `问题: ${q}`,
-        "",
-        "搜索结果:",
-        results,
-        "",
-        "要求: 用中文回答, 关键事实后面附上来源链接。",
-      ].join(NL);
-      const reply = await aiChat(env, chatId, prompt, `（联网搜索: ${q}）`);
-      await deliverAiReply(env, chatId, phId, reply, text);
-    } catch (e) {
-      console.log("search err", e);
-      await editOrSend(env, chatId, phId, "搜索的时候出了点问题, 稍后再试。", undefined, false);
-    }
+    await doSearch(env, chatId, userId, q, msg.message_id);
     return;
   }
   if (text.startsWith("/draw")) {
@@ -1111,6 +1140,32 @@ async function handleUpdate(env, update) {
   if (awaiting) {
     if (env.BOT_KV) await env.BOT_KV.delete(`awaitdraw:${chatId}`);
     await doDraw(env, chatId, userId, text, msg.message_id);
+    return;
+  }
+
+  // 搜索按钮的后续: 等关键词中
+  const awaitSearch = await kvGet(env, `awaitsearch:${chatId}`);
+  if (awaitSearch) {
+    if (env.BOT_KV) await env.BOT_KV.delete(`awaitsearch:${chatId}`);
+    if (!env.TAVILY_API_KEY) {
+      await sendText(env, chatId, "联网搜索还没接入: 需要一把 Tavily 的免费 key (找 Algo 带你注册)。");
+      return;
+    }
+    await doSearch(env, chatId, userId, text, msg.message_id);
+    return;
+  }
+
+  // 查仓库按钮的后续: 等仓库名中
+  const awaitGh = await kvGet(env, `awaitgh:${chatId}`);
+  if (awaitGh) {
+    if (env.BOT_KV) await env.BOT_KV.delete(`awaitgh:${chatId}`);
+    await tg(env, "sendChatAction", { chat_id: chatId, action: "typing" });
+    try {
+      await sendText(env, chatId, await ghInfo(text), msg.message_id);
+    } catch (e) {
+      console.log("gh err", e);
+      await sendText(env, chatId, "没查到这个仓库。格式是 用户名/仓库名, 仓库得是公开的。", msg.message_id);
+    }
     return;
   }
 
