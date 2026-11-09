@@ -1,4 +1,4 @@
-// dq686BOT v3 - Cloudflare Workers 版
+// dq686BOT v3.1 - Cloudflare Workers 版
 // 大脑 (可切换, 共用同一份聊天记录):
 //   DeepSeek 日常 (deepseek-chat) / DeepSeek 深度思考 (deepseek-reasoner)
 //   GPT-OSS 120B (Groq 免费) / GPT-OSS 20B (Groq 免费, 更快)
@@ -86,7 +86,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v3)", {
+      return new Response("dq686bot is alive (cloudflare worker v3.1)", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
@@ -124,8 +124,7 @@ async function tg(env, method, payload) {
   }
 }
 
-async function sendText(env, chatId, text, replyTo, replyMarkup, useMd) {
-  const body = text || "(空回复)";
+function splitChunks(body) {
   const chunks = [];
   let rest = body;
   while (rest.length > 4000) {
@@ -136,6 +135,11 @@ async function sendText(env, chatId, text, replyTo, replyMarkup, useMd) {
     while (rest.startsWith(NL)) rest = rest.slice(1);
   }
   chunks.push(rest);
+  return chunks;
+}
+
+async function sendText(env, chatId, text, replyTo, replyMarkup, useMd) {
+  const chunks = splitChunks(text || "(空回复)");
   for (let i = 0; i < chunks.length; i++) {
     const payload = { chat_id: chatId, text: chunks[i] };
     if (replyTo && i === 0) payload.reply_to_message_id = replyTo;
@@ -184,6 +188,41 @@ async function sendDocument(env, chatId, content, filename, caption) {
   } catch (e) {
     console.log("sendDocument failed", e);
     return null;
+  }
+}
+
+// ---------- 思考气泡: 先占位, 再把占位编辑成正式回复 ----------
+async function sendPlaceholder(env, chatId, text, replyTo) {
+  const payload = { chat_id: chatId, text };
+  if (replyTo) payload.reply_to_message_id = replyTo;
+  const res = await tg(env, "sendMessage", payload);
+  return res?.result?.message_id || null;
+}
+
+async function editOrSend(env, chatId, messageId, text, replyMarkup, useMd) {
+  const body = text || "(空回复)";
+  if (!messageId) {
+    await sendText(env, chatId, body, undefined, replyMarkup, useMd);
+    return;
+  }
+  const chunks = splitChunks(body);
+  const first = { chat_id: chatId, message_id: messageId, text: chunks[0] };
+  if (chunks.length === 1 && replyMarkup) first.reply_markup = replyMarkup;
+  let edited = false;
+  if (useMd) {
+    const r1 = await tg(env, "editMessageText", { ...first, parse_mode: "Markdown" });
+    if (r1 && r1.ok) edited = true;
+  }
+  if (!edited) {
+    const r2 = await tg(env, "editMessageText", first);
+    edited = !!(r2 && r2.ok);
+  }
+  if (!edited) {
+    await sendText(env, chatId, body, undefined, replyMarkup, useMd);
+    return;
+  }
+  if (chunks.length > 1) {
+    await sendText(env, chatId, chunks.slice(1).join(NL), undefined, replyMarkup, useMd);
   }
 }
 
@@ -376,7 +415,7 @@ async function drawImage(prompt) {
   const q = encodeURIComponent(prompt);
   const r = await fetch(
     `https://image.pollinations.ai/prompt/${q}?width=1024&height=1024&nologo=true`,
-    { headers: { "User-Agent": "dq686bot/3.0" } }
+    { headers: { "User-Agent": "dq686bot/3.1" } }
   );
   if (!r.ok) throw new Error(`draw HTTP ${r.status}`);
   return await r.arrayBuffer();
@@ -593,6 +632,7 @@ async function handleUpdate(env, update) {
       return;
     }
     await tg(env, "sendChatAction", { chat_id: chatId, action: "typing" });
+    const phId = await sendPlaceholder(env, chatId, "👀 小多正在看图…", msg.message_id);
     try {
       const fileId = photos[photos.length - 1].file_id;
       const info = await tg(env, "getFile", { file_id: fileId });
@@ -601,10 +641,10 @@ async function handleUpdate(env, update) {
       const buf = await fr.arrayBuffer();
       const prompt = caption || "用中文详细描述并解释这张图片的内容。";
       const answer = await aiVision(env, buf, prompt);
-      await sendText(env, chatId, answer, msg.message_id, undefined, true);
+      await editOrSend(env, chatId, phId, answer, undefined, true);
     } catch (e) {
       console.log("vision err", e);
-      await sendText(env, chatId, "看图时出了点问题, 稍后再发一次试试。");
+      await editOrSend(env, chatId, phId, "看图时出了点问题, 稍后再发一次试试。", undefined, false);
     }
     return;
   }
@@ -666,32 +706,33 @@ async function handleUpdate(env, update) {
     return;
   }
   await tg(env, "sendChatAction", { chat_id: chatId, action: "typing" });
+  const phId = await sendPlaceholder(env, chatId, "💭 小多正在思考…", msg.message_id);
   try {
     const reply = await aiChat(env, chatId, text);
     const blocks = extractBlocks(reply);
-    let markup;
     if (blocks.length) {
       await kvPut(env, `lastcode:${chatId}`, JSON.stringify(blocks), 60 * 60);
       const wantFile = text.includes("文件");
       const huge = blocks.some((b) => b.code.length > 3000);
       if (wantFile || huge) {
-        await sendText(env, chatId, reply, msg.message_id, undefined, true);
+        await editOrSend(env, chatId, phId, reply, undefined, true);
         await sendBlocksAsFiles(env, chatId, blocks);
         return;
       }
-      markup = FILE_KB;
+      await editOrSend(env, chatId, phId, reply, FILE_KB, true);
+      return;
     }
-    await sendText(env, chatId, reply, msg.message_id, markup, true);
+    await editOrSend(env, chatId, phId, reply, undefined, true);
   } catch (e) {
     console.log("chat err", e);
     if (e.status === 401) {
-      await sendText(env, chatId, "大脑的 key 验不过 (401), 找 Algo 查。");
+      await editOrSend(env, chatId, phId, "大脑的 key 验不过 (401), 找 Algo 查。", undefined, false);
     } else if (e.status === 402) {
-      await sendText(env, chatId, "DeepSeek 余额不足了。点 🧠 换模型 切到 Groq 免费版先用着。", undefined, MODEL_KB);
+      await editOrSend(env, chatId, phId, "DeepSeek 余额不足了。点 🧠 换模型 切到 Groq 免费版先用着。", MODEL_KB, false);
     } else if (e.status === 429) {
-      await sendText(env, chatId, "问太快被限流了, 等一分钟再试。");
+      await editOrSend(env, chatId, phId, "问太快被限流了, 等一分钟再试。", undefined, false);
     } else {
-      await sendText(env, chatId, "我刚走神了, 再说一遍试试。");
+      await editOrSend(env, chatId, phId, "我刚走神了, 再说一遍试试。", undefined, false);
     }
   }
 }
