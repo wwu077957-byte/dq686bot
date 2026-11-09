@@ -14,9 +14,9 @@
 1. Render 登录后选 New → Blueprint，选本仓库，Apply。
 2. 在服务的 Environment 里填：
    - `BOT_TOKEN`：BotFather 给的新 token（不要写进代码、不要发聊天里）
-   - `DEEPSEEK_API_KEY`：DeepSeek 的 key（若用中转，把 `DEEPSEEK_BASE_URL` 改成中转地址）
+   - `DEEPSEEK_API_KEY`：AI 大脑的 key。当前 render.yaml 预设大脑为 Groq 免费版（地址/模型已填好），这里填 Groq 的 key 即可；以后换 DeepSeek 时改地址、模型、key 三项
    - `ALLOWED_IDS`：主人自己的 Telegram 数字 ID（先私聊机器人发 `/myid` 可查到；不填时第一个 /start 的人会被临时认作主人）
-   - `GROQ_API_KEY`（可选）：开通看图功能
+   - `GROQ_API_KEY`：填同一把 Groq key，即可开通看图功能
 3. 部署完成后机器人自动设置 Webhook。私聊机器人发 `/help` 验证。
 
 ## 命令
