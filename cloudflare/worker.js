@@ -1,16 +1,20 @@
-// dq686BOT v3.1 - Cloudflare Workers 版
+// dq686BOT v4 - Cloudflare Workers 版
 // 大脑 (可切换, 共用同一份聊天记录):
 //   DeepSeek 日常 (deepseek-chat) / DeepSeek 深度思考 (deepseek-reasoner)
 //   GPT-OSS 120B (Groq 免费) / GPT-OSS 20B (Groq 免费, 更快)
-// 看图: Groq 视觉模型 (GROQ_API_KEY)
-// 作图: Pollinations 免费接口
-// 代码交付: 回复带按钮, 一点把代码块存成文件发送; 用户说"文件"或代码太长时自动发文件
+// 看图: Groq 视觉模型 (GROQ_API_KEY); 作图: Pollinations 免费接口
+// 代码交付: 回复带按钮, 一点把代码块存成文件发送; 说"文件"或代码太长时自动发文件
+// 读链接: 发网址自动抓正文总结; 读文件: txt/md/代码/日志等文本文件发来就能读
+// 联网搜索: /s 关键词 (需 TAVILY_API_KEY, 没接时会老实说未接入)
+// GitHub: /gh 用户名/仓库名 查仓库动态
+// 每日早报: 控制台给 Worker 加 Cron 触发器 "0 0 * * *" (UTC) = 每天北京时间 08:00
 // 存储: KV (绑定名 BOT_KV) 存会话记忆/白名单主人/每日计数/模型选择/最近代码
 //
 // 环境变量 (在 Workers 设置里填, 不要写进代码):
 //   BOT_TOKEN        必需, BotFather 的 token (密钥)
 //   DEEPSEEK_API_KEY DeepSeek 官方 key (密钥); 有它默认大脑就是 DeepSeek
 //   GROQ_API_KEY     Groq 的 key (密钥); Groq 聊天 + 看图用
+//   TAVILY_API_KEY   可选 (密钥), Tavily 搜索 key; 没有则 /s 提示未接入
 //   ALLOWED_IDS      可选, 逗号分隔的 Telegram 数字 ID; 空 = 第一个 /start 的人临时认主
 //   DEEPSEEK_MODEL   可选, 覆盖 DeepSeek 日常模型名, 默认 deepseek-chat
 //   GROQ_MODEL       可选, 覆盖 GPT-OSS 120B 模型名 (也兼容旧变量名 AI_MODEL)
@@ -26,10 +30,15 @@ const MEM_ROUNDS = 10;
 const HELP = `我是小多, 多情的私人 AI 助手。
 
 直接发消息 = 跟我聊天 (记得最近 10 轮, 换模型也不丢)
+发网址给我 = 我读完帮你总结
+发文件给我 = txt、代码、日志这类文件我能读懂再回答
 /new - 清空记忆, 开新话题
 /draw 描述 - 画图, 例: /draw 一只在海边看日落的橘猫
 发图片给我 = 我帮你看图
-/model - 切换大脑 (DeepSeek 日常 / 深度思考 / GPT-OSS 两个档)
+/model - 切换大脑 (DeepSeek 两个档 / GPT-OSS 两个档)
+/s 关键词 - 联网搜索 (要先接入搜索 key)
+/gh 用户名/仓库名 - 查 GitHub 仓库动态
+/morning - 看今天的早报
 /myid - 查看你的 Telegram 数字 ID
 /help - 这份说明
 
@@ -68,6 +77,11 @@ const FILE_KB = {
 };
 
 const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20"];
+const TEXT_EXTS = [
+  "txt", "md", "markdown", "json", "csv", "log", "py", "js", "ts", "html",
+  "htm", "css", "xml", "yml", "yaml", "ini", "sh", "java", "c", "cpp", "h",
+  "go", "rs", "php", "sql", "vue",
+];
 
 function systemPrompt(brainLabel) {
   return [
@@ -86,7 +100,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v3.1)", {
+      return new Response("dq686bot is alive (cloudflare worker v4)", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
@@ -106,6 +120,10 @@ export default {
       return new Response("ok");
     }
     return new Response("not found", { status: 404 });
+  },
+
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(sendBriefing(env).catch((e) => console.log("briefing err", e)));
   },
 };
 
@@ -147,7 +165,6 @@ async function sendText(env, chatId, text, replyTo, replyMarkup, useMd) {
     if (useMd) {
       const res = await tg(env, "sendMessage", { ...payload, parse_mode: "Markdown" });
       if (res && res.ok) continue;
-      // Markdown 解析失败就用纯文本重发这一段
     }
     await tg(env, "sendMessage", payload);
   }
@@ -322,7 +339,7 @@ async function getBrain(env, chatId) {
   return "gptoss";
 }
 
-async function aiChat(env, chatId, userText) {
+async function aiChat(env, chatId, userText, historyText) {
   let brain = await getBrain(env, chatId);
   let cfg = brainConfig(env, brain);
   let fellBack = false;
@@ -367,7 +384,10 @@ async function aiChat(env, chatId, userText) {
   }
   const data = await r.json();
   let reply = (data.choices?.[0]?.message?.content || "").trim();
-  history.push({ role: "user", content: userText }, { role: "assistant", content: reply });
+  history.push(
+    { role: "user", content: historyText || userText },
+    { role: "assistant", content: reply }
+  );
   while (history.length > MEM_ROUNDS * 2) history.shift();
   await kvPut(env, `mem:${chatId}`, JSON.stringify(history), 60 * 60 * 24 * 7);
   if (fellBack) reply += `${NL}${NL}(先用 ${cfg.label} 回你, 你选的那个大脑还没接好)`;
@@ -415,7 +435,7 @@ async function drawImage(prompt) {
   const q = encodeURIComponent(prompt);
   const r = await fetch(
     `https://image.pollinations.ai/prompt/${q}?width=1024&height=1024&nologo=true`,
-    { headers: { "User-Agent": "dq686bot/3.1" } }
+    { headers: { "User-Agent": "dq686bot/4.0" } }
   );
   if (!r.ok) throw new Error(`draw HTTP ${r.status}`);
   return await r.arrayBuffer();
@@ -498,6 +518,32 @@ async function sendBlocksAsFiles(env, chatId, blocks) {
   }
 }
 
+// AI 回复的统一交付: 有代码块就挂文件按钮; 说了"文件"或代码太长就直接发文件
+async function deliverAiReply(env, chatId, phId, reply, userText) {
+  const blocks = extractBlocks(reply);
+  if (blocks.length) {
+    await kvPut(env, `lastcode:${chatId}`, JSON.stringify(blocks), 60 * 60);
+    const wantFile = (userText || "").includes("文件");
+    const huge = blocks.some((b) => b.code.length > 3000);
+    if (wantFile || huge) {
+      await editOrSend(env, chatId, phId, reply, undefined, true);
+      await sendBlocksAsFiles(env, chatId, blocks);
+      return;
+    }
+    await editOrSend(env, chatId, phId, reply, FILE_KB, true);
+    return;
+  }
+  await editOrSend(env, chatId, phId, reply, undefined, true);
+}
+
+function chatErrorText(e) {
+  if (e.status === 401) return "大脑的 key 验不过 (401), 找 Algo 查。";
+  if (e.status === 402) return "DeepSeek 余额不足了。点 🧠 换模型 切到 Groq 免费版先用着。";
+  if (e.status === 429) return "问太快被限流了, 等一分钟再试。";
+  return "我刚走神了, 再说一遍试试。";
+}
+
+// ---------- 模型切换 ----------
 async function sendModelPicker(env, chatId) {
   const brain = await getBrain(env, chatId);
   const label = brainConfig(env, brain).label;
@@ -519,6 +565,162 @@ async function setBrain(env, chatId, brain) {
   await kvPut(env, `brain:${chatId}`, brain);
   const label = brainConfig(env, brain).label;
   await sendText(env, chatId, `好, 大脑切到 ${label} 了, 聊天记录照旧, 继续聊吧。`, undefined, MENU_KB);
+}
+
+// ---------- 读链接 ----------
+function extractFirstUrl(text) {
+  const parts = String(text).split(/\s+/);
+  for (const p of parts) {
+    if (p.startsWith("http://") || p.startsWith("https://")) {
+      return p.replace(/[)）】」』。,，、;；]+$/, "");
+    }
+  }
+  return null;
+}
+
+async function fetchPageText(url) {
+  const r = await fetch(url, {
+    headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 dq686bot/4.0" },
+    redirect: "follow",
+  });
+  if (!r.ok) throw new Error(`page HTTP ${r.status}`);
+  const ct = r.headers.get("content-type") || "";
+  const raw = await r.text();
+  if (!ct.includes("html") && !ct.includes("text")) return raw.slice(0, 12000);
+  return raw
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 12000);
+}
+
+// ---------- 联网搜索 (Tavily) ----------
+async function tavilySearch(env, query) {
+  const r = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      api_key: env.TAVILY_API_KEY,
+      query,
+      search_depth: "basic",
+      max_results: 5,
+      include_answer: false,
+    }),
+  });
+  if (!r.ok) throw new Error(`search HTTP ${r.status}`);
+  const data = await r.json();
+  const items = (data.results || []).map((it, i) =>
+    [`${i + 1}. ${it.title || ""}`, (it.content || "").slice(0, 400), it.url || ""].join(NL)
+  );
+  return items.join(NL + NL);
+}
+
+// ---------- GitHub 仓库动态 ----------
+async function ghInfo(arg) {
+  let slug = String(arg || "").trim();
+  slug = slug.replace(/^https?:\/\/github\.com\//, "").replace(/\/+$/, "");
+  const parts = slug.split("/").filter(Boolean);
+  if (parts.length < 2) throw new Error("bad slug");
+  const repoPath = `${parts[0]}/${parts[1]}`;
+  const headers = { "User-Agent": "dq686bot", Accept: "application/vnd.github+json" };
+  const [repoR, commitsR, issuesR] = await Promise.all([
+    fetch(`https://api.github.com/repos/${repoPath}`, { headers }),
+    fetch(`https://api.github.com/repos/${repoPath}/commits?per_page=3`, { headers }),
+    fetch(`https://api.github.com/repos/${repoPath}/issues?per_page=10&state=open`, { headers }),
+  ]);
+  if (!repoR.ok) throw new Error(`gh HTTP ${repoR.status}`);
+  const repo = await repoR.json();
+  const lines = [
+    `🐙 ${repo.full_name}`,
+    repo.description || "",
+    `⭐ ${repo.stargazers_count} · 🍴 ${repo.forks_count} · 待处理 issue ${repo.open_issues_count}`,
+    `最近推送: ${String(repo.pushed_at || "").slice(0, 10)}`,
+  ];
+  if (commitsR.ok) {
+    const commits = await commitsR.json();
+    if (Array.isArray(commits) && commits.length) {
+      lines.push("", "最新提交:");
+      for (const c of commits) {
+        const first = String(c.commit?.message || "").split(NL)[0];
+        lines.push(`· ${String(c.sha || "").slice(0, 7)} ${first} (${String(c.commit?.author?.date || "").slice(0, 10)})`);
+      }
+    }
+  }
+  if (issuesR.ok) {
+    const issues = await issuesR.json();
+    const real = (Array.isArray(issues) ? issues : []).filter((i) => !i.pull_request).slice(0, 3);
+    if (real.length) {
+      lines.push("", "待处理 issue:");
+      for (const i of real) lines.push(`· #${i.number} ${i.title}`);
+    }
+  }
+  return lines.filter((l) => l !== "").join(NL);
+}
+
+// ---------- 每日早报 ----------
+function weatherLabel(code) {
+  const map = {
+    0: "晴", 1: "多云", 2: "多云", 3: "阴", 45: "雾", 48: "雾",
+    51: "毛毛雨", 53: "毛毛雨", 55: "毛毛雨", 61: "小雨", 63: "中雨", 65: "大雨",
+    66: "冻雨", 67: "冻雨", 71: "小雪", 73: "中雪", 75: "大雪", 77: "雪粒",
+    80: "阵雨", 81: "阵雨", 82: "暴雨阵雨", 85: "阵雪", 86: "阵雪",
+    95: "雷阵雨", 96: "雷阵雨伴冰雹", 99: "雷阵雨伴冰雹",
+  };
+  return map[code] || "多云";
+}
+
+async function composeBriefing() {
+  const dateStr = new Date().toLocaleDateString("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    month: "long",
+    day: "numeric",
+    weekday: "long",
+  });
+  const lines = [`☀️ 早上好, 多情。今天是 ${dateStr}。`];
+  try {
+    const api =
+      "https://api.open-meteo.com/v1/forecast?latitude=26.08&longitude=119.28" +
+      "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code" +
+      "&timezone=Asia%2FShanghai&forecast_days=1";
+    const r = await fetch(api);
+    if (r.ok) {
+      const d = await r.json();
+      const max = Math.round(d.daily.temperature_2m_max[0]);
+      const min = Math.round(d.daily.temperature_2m_min[0]);
+      const pop = d.daily.precipitation_probability_max?.[0];
+      const label = weatherLabel(d.daily.weather_code[0]);
+      let w = `福州今天 ${label}, ${min}~${max}°C`;
+      if (pop != null) w += `, 降雨概率 ${pop}%`;
+      lines.push(w + "。");
+      if (max >= 30) lines.push("穿短袖就行, 注意防晒多喝水。");
+      else if (max >= 24) lines.push("短袖加件薄外套, 早晚温差大。");
+      else if (max >= 17) lines.push("穿件薄外套正好。");
+      else if (max >= 10) lines.push("有点凉, 外套穿厚点, 加条围巾更稳。");
+      else lines.push("冷, 羽绒服围巾帽子都安排上。");
+      if (pop != null && pop >= 50) lines.push("出门记得带伞。");
+    }
+  } catch (e) {
+    console.log("weather err", e);
+  }
+  lines.push("", "—— 小多 · 每日早报");
+  return lines.join(NL);
+}
+
+async function sendBriefing(env) {
+  let target = null;
+  const allow = [...allowedIds(env)];
+  if (allow.length) target = allow[0];
+  if (!target) target = await kvGet(env, "owner");
+  if (!target) return;
+  await sendText(env, target, await composeBriefing());
 }
 
 // ---------- 按钮回调 ----------
@@ -583,6 +785,7 @@ async function handleUpdate(env, update) {
   let text = (msg.text || "").trim();
   let caption = (msg.caption || "").trim();
   const photos = msg.photo || [];
+  const doc = msg.document || null;
 
   if (text.startsWith("/myid")) {
     await sendText(env, chatId, `你的 Telegram 数字 ID 是: ${userId}`);
@@ -617,11 +820,60 @@ async function handleUpdate(env, update) {
     const isReplyToBot = !!replyFrom?.is_bot;
     const mentioned =
       text.toLowerCase().includes("@dq686bot") || caption.toLowerCase().includes("@dq686bot");
-    if (!(text.startsWith("/") || caption.startsWith("/") || isReplyToBot || mentioned)) return;
+    if (!(text.startsWith("/") || caption.startsWith("/") || isReplyToBot || mentioned || doc)) return;
     text = text.replace(/@dq686BOT/g, "").replace(/@dq686bot/g, "").trim();
     caption = caption.replace(/@dq686BOT/g, "").replace(/@dq686bot/g, "").trim();
   }
 
+  // ----- 文件阅读 -----
+  if (doc) {
+    const name = doc.file_name || "file";
+    const ext = name.includes(".") ? name.split(".").pop().toLowerCase() : "";
+    const mime = (doc.mime_type || "").toLowerCase();
+    const isText = TEXT_EXTS.includes(ext) || mime.startsWith("text/");
+    if (!isText) {
+      await sendText(
+        env,
+        chatId,
+        `这个文件 (${name}) 我暂时读不了。我现在能读的是 txt、md、代码、日志这类文本文件; PDF、Word、压缩包还不行。你可以把内容复制成文字发我, 一样能聊。`,
+        msg.message_id
+      );
+      return;
+    }
+    if (doc.file_size && doc.file_size > 2 * 1024 * 1024) {
+      await sendText(env, chatId, "这个文件太大了 (超过 2MB), 我读不完。拆小一点再发我。", msg.message_id);
+      return;
+    }
+    if (!(await quotaTake(env, userId))) {
+      await sendText(env, chatId, "今天的 AI 额度用完了, 明天再来。");
+      return;
+    }
+    await tg(env, "sendChatAction", { chat_id: chatId, action: "typing" });
+    const phId = await sendPlaceholder(env, chatId, "📄 小多正在读文件…", msg.message_id);
+    try {
+      const info = await tg(env, "getFile", { file_id: doc.file_id });
+      const filePath = info?.result?.file_path;
+      const fr = await fetch(`https://api.telegram.org/file/bot${env.BOT_TOKEN}/${filePath}`);
+      const buf = await fr.arrayBuffer();
+      const content = new TextDecoder("utf-8").decode(buf).slice(0, 15000);
+      const ask = caption || "帮我总结这个文件的要点";
+      const prompt = [
+        `我给你发了一个文件「${name}」, 内容如下:`,
+        "---",
+        content,
+        "---",
+        `我的要求: ${ask}`,
+      ].join(NL);
+      const reply = await aiChat(env, chatId, prompt, `（发了文件 ${name}）`);
+      await deliverAiReply(env, chatId, phId, reply, caption);
+    } catch (e) {
+      console.log("doc err", e);
+      await editOrSend(env, chatId, phId, chatErrorText(e), e.status === 402 ? MODEL_KB : undefined, false);
+    }
+    return;
+  }
+
+  // ----- 图片理解 -----
   if (photos.length > 0) {
     if (!env.GROQ_API_KEY) {
       await sendText(env, chatId, "看图功能还没接上 key, 找多情/Algo 处理。");
@@ -664,6 +916,10 @@ async function handleUpdate(env, update) {
     await sendText(env, chatId, "记忆清空了, 咱重新聊。", undefined, MENU_KB);
     return;
   }
+  if (text.startsWith("/morning")) {
+    await sendText(env, chatId, await composeBriefing());
+    return;
+  }
   if (text.startsWith("/model")) {
     const arg = text.slice("/model".length).trim().toLowerCase();
     const alias = { ds: "deepseek", pro: "deepseek-pro", reasoner: "deepseek-pro", groq: "gptoss", gpt: "gptoss", fast: "gptoss20" };
@@ -677,6 +933,60 @@ async function handleUpdate(env, update) {
       return;
     }
     await sendModelPicker(env, chatId);
+    return;
+  }
+  if (text.startsWith("/gh")) {
+    const arg = text.slice(3).trim();
+    if (!arg) {
+      await sendText(env, chatId, "格式: /gh 用户名/仓库名, 比如 /gh wwu077957-byte/dq686bot");
+      return;
+    }
+    await tg(env, "sendChatAction", { chat_id: chatId, action: "typing" });
+    try {
+      await sendText(env, chatId, await ghInfo(arg), msg.message_id);
+    } catch (e) {
+      console.log("gh err", e);
+      await sendText(env, chatId, "没查到这个仓库。格式是 /gh 用户名/仓库名, 仓库得是公开的。", msg.message_id);
+    }
+    return;
+  }
+  if (text === "/s" || text.startsWith("/s ")) {
+    const q = text.slice(2).trim();
+    if (!q) {
+      await sendText(env, chatId, "格式: /s 你要搜的东西, 比如 /s 今天有什么 AI 新闻");
+      return;
+    }
+    if (!env.TAVILY_API_KEY) {
+      await sendText(env, chatId, "联网搜索还没接入: 需要一把 Tavily 的免费 key (找 Algo 带你注册)。先用着其他功能吧。");
+      return;
+    }
+    if (!(await quotaTake(env, userId))) {
+      await sendText(env, chatId, "今天的 AI 额度用完了, 明天再来。");
+      return;
+    }
+    await tg(env, "sendChatAction", { chat_id: chatId, action: "typing" });
+    const phId = await sendPlaceholder(env, chatId, "🔍 小多正在联网搜索…", msg.message_id);
+    try {
+      const results = await tavilySearch(env, q);
+      if (!results) {
+        await editOrSend(env, chatId, phId, "没搜到什么有用的结果, 换个关键词试试。", undefined, false);
+        return;
+      }
+      const prompt = [
+        `请根据下面的联网搜索结果, 回答我的问题。`,
+        `问题: ${q}`,
+        "",
+        "搜索结果:",
+        results,
+        "",
+        "要求: 用中文回答, 关键事实后面附上来源链接。",
+      ].join(NL);
+      const reply = await aiChat(env, chatId, prompt, `（联网搜索: ${q}）`);
+      await deliverAiReply(env, chatId, phId, reply, text);
+    } catch (e) {
+      console.log("search err", e);
+      await editOrSend(env, chatId, phId, "搜索的时候出了点问题, 稍后再试。", undefined, false);
+    }
     return;
   }
   if (text.startsWith("/draw")) {
@@ -706,33 +1016,46 @@ async function handleUpdate(env, update) {
     return;
   }
   await tg(env, "sendChatAction", { chat_id: chatId, action: "typing" });
+
+  // ----- 读链接 -----
+  const pageUrl = extractFirstUrl(text);
+  if (pageUrl) {
+    const phId = await sendPlaceholder(env, chatId, "🔗 小多正在读这篇文章…", msg.message_id);
+    try {
+      const pageText = await fetchPageText(pageUrl);
+      if (!pageText || pageText.length < 30) throw new Error("empty page");
+      const ask = text.replace(pageUrl, "").trim() || "请总结这篇文章的要点, 说清它讲了什么、重点在哪";
+      const prompt = [
+        `我分享了一篇文章链接: ${pageUrl}`,
+        "正文如下:",
+        "---",
+        pageText,
+        "---",
+        `我的要求: ${ask}`,
+      ].join(NL);
+      const reply = await aiChat(env, chatId, prompt, `（分享了链接 ${pageUrl}）`);
+      await deliverAiReply(env, chatId, phId, reply, text);
+    } catch (e) {
+      console.log("page err", e);
+      await editOrSend(
+        env,
+        chatId,
+        phId,
+        "这个链接我没读进去 (可能被网站挡了, 或者要登录才能看)。你把正文复制发我, 我一样能帮你总结。",
+        undefined,
+        false
+      );
+    }
+    return;
+  }
+
+  // ----- 普通聊天 -----
   const phId = await sendPlaceholder(env, chatId, "💭 小多正在思考…", msg.message_id);
   try {
     const reply = await aiChat(env, chatId, text);
-    const blocks = extractBlocks(reply);
-    if (blocks.length) {
-      await kvPut(env, `lastcode:${chatId}`, JSON.stringify(blocks), 60 * 60);
-      const wantFile = text.includes("文件");
-      const huge = blocks.some((b) => b.code.length > 3000);
-      if (wantFile || huge) {
-        await editOrSend(env, chatId, phId, reply, undefined, true);
-        await sendBlocksAsFiles(env, chatId, blocks);
-        return;
-      }
-      await editOrSend(env, chatId, phId, reply, FILE_KB, true);
-      return;
-    }
-    await editOrSend(env, chatId, phId, reply, undefined, true);
+    await deliverAiReply(env, chatId, phId, reply, text);
   } catch (e) {
     console.log("chat err", e);
-    if (e.status === 401) {
-      await editOrSend(env, chatId, phId, "大脑的 key 验不过 (401), 找 Algo 查。", undefined, false);
-    } else if (e.status === 402) {
-      await editOrSend(env, chatId, phId, "DeepSeek 余额不足了。点 🧠 换模型 切到 Groq 免费版先用着。", MODEL_KB, false);
-    } else if (e.status === 429) {
-      await editOrSend(env, chatId, phId, "问太快被限流了, 等一分钟再试。", undefined, false);
-    } else {
-      await editOrSend(env, chatId, phId, "我刚走神了, 再说一遍试试。", undefined, false);
-    }
+    await editOrSend(env, chatId, phId, chatErrorText(e), e.status === 402 ? MODEL_KB : undefined, false);
   }
 }
