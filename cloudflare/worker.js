@@ -224,7 +224,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v5.4)", {
+      return new Response("dq686bot is alive (cloudflare worker v5.5)", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
@@ -1456,6 +1456,22 @@ async function fetchAudioBytes(url) {
   }
 }
 
+async function gdStudioUrl(songId, diag) {
+  try {
+    const u = "https://music-api.gdstudio.xyz/api.php?types=url&source=netease&id=" + encodeURIComponent(songId) + "&br=320";
+    const r = await fetch(u, { headers: { "User-Agent": MUSIC_UA } });
+    if (!r.ok) { diag.stage = "G0"; return null; }
+    const j = await r.json();
+    if (j && j.url) return j.url;
+    diag.stage = "G1";
+    return null;
+  } catch (e) {
+    console.log("gd err", e);
+    diag.stage = "G0";
+    return null;
+  }
+}
+
 async function kuwoCandidates(name, artist, diag) {
   const firstArtist = (artist || "").split("/")[0].trim();
   const queries = [];
@@ -1591,7 +1607,9 @@ async function doMusicPlay(env, chatId, songId) {
     if (u) buf = await fetchSongBuf(u, expect, diag);
     if (buf) viaKuwo = true;
   } else {
-    buf = await fetchSongBuf("https://music.163.com/song/media/outer/url?id=" + songId + ".mp3", expect, diag);
+    const gu = await gdStudioUrl(songId, diag);
+    if (gu) buf = await fetchSongBuf(gu, expect, diag);
+    if (!buf) buf = await fetchSongBuf("https://music.163.com/song/media/outer/url?id=" + songId + ".mp3", expect, diag);
   }
   if (!buf) {
     const cands = await kuwoCandidates(name, artist, diag);
