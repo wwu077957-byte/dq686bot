@@ -224,7 +224,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v5.5)", {
+      return new Response("dq686bot is alive (cloudflare worker v5.6)", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
@@ -1565,6 +1565,18 @@ async function fetchSongBuf(url, expectSec, diag) {
   return buf;
 }
 
+function keepTyping(env, chatId, action) {
+  let stopped = false;
+  const tick = () => {
+    if (stopped) return;
+    tg(env, "sendChatAction", { chat_id: chatId, action: action || "typing" }).catch(() => {});
+  };
+  tick();
+  const iv = setInterval(tick, 4000);
+  const cap = setTimeout(() => { stopped = true; clearInterval(iv); }, 90000);
+  return () => { stopped = true; clearInterval(iv); clearTimeout(cap); };
+}
+
 async function ensureBotCommands(env) {
   try {
     if (await kvGet(env, "sys:cmdset")) return;
@@ -1597,7 +1609,7 @@ async function doMusicPlay(env, chatId, songId) {
   }
   const name = info?.name || "未知歌曲";
   const artist = info?.artist || "";
-  await tg(env, "sendChatAction", { chat_id: chatId, action: "upload_voice" });
+  const stopUp = keepTyping(env, chatId, "upload_voice");
   const diag = { stage: "K0" };
   const expect = info?.dur || 0;
   let buf = null;
@@ -1622,6 +1634,7 @@ async function doMusicPlay(env, chatId, songId) {
     }
   }
   if (!buf) {
+    stopUp();
     await sendText(env, chatId, `《${name}》网易云和酷我这次都没拿到能放的完整版 (多半是版权限制), 换个版本试试。(诊断码 ${diag.stage}, 截图给 Algo 看)`);
     return;
   }
@@ -1662,6 +1675,7 @@ async function doMusicPlay(env, chatId, songId) {
   if (!sent) {
     await sendText(env, chatId, `《${name}》传给你的时候出错了, 再点一次试试。`);
   }
+  stopUp();
 }
 
 // ---------- 按钮回调 ----------
@@ -2315,7 +2329,7 @@ async function handleUpdate(env, update) {
     await sendText(env, chatId, "今天的 AI 额度用完了, 明天再来。");
     return;
   }
-  await tg(env, "sendChatAction", { chat_id: chatId, action: "typing" });
+  const stopTyping = keepTyping(env, chatId);
 
   // ----- 读链接 -----
   const pageUrl = extractFirstUrl(text);
@@ -2346,6 +2360,7 @@ async function handleUpdate(env, update) {
         false
       );
     }
+    stopTyping();
     return;
   }
 
@@ -2358,4 +2373,5 @@ async function handleUpdate(env, update) {
     console.log("chat err", e);
     await editOrSend(env, chatId, phId, chatErrorText(e), e.status === 402 ? MODEL_KB : undefined, false);
   }
+  stopTyping();
 }
