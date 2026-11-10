@@ -223,7 +223,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v5)", {
+      return new Response("dq686bot is alive (cloudflare worker v5.2)", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
@@ -1406,6 +1406,68 @@ async function doMusicSearch(env, chatId, userId, query, replyTo) {
   await sendText(env, chatId, lines.join(NL), replyTo, { inline_keyboard: rows });
 }
 
+async function fetchAudioBytes(url) {
+  try {
+    const r = await fetch(url, { headers: { "User-Agent": MUSIC_UA } });
+    if (!r.ok) return null;
+    const ctype = r.headers.get("content-type") || "";
+    const buf = await r.arrayBuffer();
+    if (buf.byteLength < 20000) return null;
+    if (/audio|octet-stream/i.test(ctype)) return buf;
+    const b = new Uint8Array(buf.slice(0, 3));
+    if ((b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33) || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0)) return buf;
+    return null;
+  } catch (e) {
+    console.log("audio fetch err", e);
+    return null;
+  }
+}
+
+async function kuwoPlayUrl(name, artist) {
+  try {
+    const kw = encodeURIComponent(((name || "") + " " + (artist || "")).trim());
+    const su = "https://search.kuwo.cn/r.s?client=kt&all=" + kw + "&pn=0&rn=3&ft=music&encoding=utf8&rformat=json&vipver=1&mobi=1";
+    const sr = await fetch(su, { headers: { "User-Agent": MUSIC_UA } });
+    if (!sr.ok) return null;
+    const sj = await sr.json();
+    const first = (sj.abslist || [])[0];
+    const rid = first && first.DC_TARGETID;
+    if (!rid) return null;
+    const au = "https://antiserver.kuwo.cn/anti.s?type=convert_url3&rid=MUSIC_" + rid + "&format=mp3&response=url";
+    const ar = await fetch(au, { headers: { "User-Agent": MUSIC_UA } });
+    if (!ar.ok) return null;
+    const at = (await ar.text()).trim();
+    if (at.startsWith("{")) {
+      const aj = JSON.parse(at);
+      return aj.url || null;
+    }
+    return at.startsWith("http") ? at : null;
+  } catch (e) {
+    console.log("kuwo err", e);
+    return null;
+  }
+}
+
+async function ensureBotCommands(env) {
+  try {
+    if (await kvGet(env, "sys:cmdset")) return;
+    await tg(env, "setMyCommands", {
+      commands: [
+        { command: "start", description: "🏠 打开菜单" },
+        { command: "music", description: "🎵 点歌, 例: /music 入戏太深" },
+        { command: "help", description: "❓ 帮助" },
+        { command: "new", description: "🆕 新话题" },
+        { command: "memory", description: "🧠 我的长期记忆" },
+        { command: "remind", description: "⏰ 设个提醒" },
+        { command: "status", description: "📊 机器人状态" },
+      ],
+    });
+    await kvPut(env, "sys:cmdset", "1", 604800);
+  } catch (e) {
+    console.log("cmdset err", e);
+  }
+}
+
 async function doMusicPlay(env, chatId, songId) {
   let info = null;
   const raw = await kvGet(env, `musq:${chatId}`);
@@ -1419,18 +1481,17 @@ async function doMusicPlay(env, chatId, songId) {
   const name = info?.name || "未知歌曲";
   const artist = info?.artist || "";
   await tg(env, "sendChatAction", { chat_id: chatId, action: "upload_voice" });
-  const src = "https://music.163.com/song/media/outer/url?id=" + songId + ".mp3";
-  let buf = null;
-  let ctype = "";
-  try {
-    const r = await fetch(src, { headers: { "User-Agent": MUSIC_UA } });
-    ctype = r.headers.get("content-type") || "";
-    if (r.ok) buf = await r.arrayBuffer();
-  } catch (e) {
-    console.log("music fetch err", e);
+  let buf = await fetchAudioBytes("https://music.163.com/song/media/outer/url?id=" + songId + ".mp3");
+  let viaKuwo = false;
+  if (!buf) {
+    const ku = await kuwoPlayUrl(name, artist);
+    if (ku) {
+      buf = await fetchAudioBytes(ku);
+      viaKuwo = !!buf;
+    }
   }
-  if (!buf || !/audio|octet-stream/i.test(ctype) || buf.byteLength < 20000) {
-    await sendText(env, chatId, `《${name}》这首源站不给放 (多半是版权限制), 点别的试试。`);
+  if (!buf) {
+    await sendText(env, chatId, `《${name}》网易云和酷我都拿不到这首的流 (多半是版权限制), 换个版本试试, 比如搜「歌名 DJ版」。`);
     return;
   }
   const form = new FormData();
@@ -1438,7 +1499,7 @@ async function doMusicPlay(env, chatId, songId) {
   form.append("title", name.slice(0, 60));
   if (artist) form.append("performer", artist.slice(0, 60));
   if (info?.dur) form.append("duration", String(info.dur));
-  form.append("caption", `🎵 ${name}${artist ? " - " + artist : ""}`);
+  form.append("caption", `🎵 ${name}${artist ? " - " + artist : ""}${viaKuwo ? " (酷我源)" : ""}`);
   form.append("audio", new Blob([buf], { type: "audio/mpeg" }), `${name} - ${artist}.mp3`.slice(0, 80));
   try {
     const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendAudio`, { method: "POST", body: form });
@@ -1731,6 +1792,7 @@ async function handleUpdate(env, update) {
   if (!text) return;
 
   if (text.startsWith("/start")) {
+    await ensureBotCommands(env);
     await sendText(env, chatId, "在呢, 喊一声就应 👋 我是小多。直接发消息跟我聊, 或者点下面的按钮 👇", undefined, MENU_KB);
     return;
   }
