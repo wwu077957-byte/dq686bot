@@ -223,7 +223,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v5.2)", {
+      return new Response("dq686bot is alive (cloudflare worker v5.3)", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
@@ -1423,27 +1423,45 @@ async function fetchAudioBytes(url) {
   }
 }
 
-async function kuwoPlayUrl(name, artist) {
+async function kuwoResolve(name, artist, diag) {
+  const firstArtist = (artist || "").split("/")[0].trim();
+  const queries = [];
+  const q1 = ((name || "") + " " + firstArtist).trim();
+  if (q1) queries.push(q1);
+  if (name && name !== q1) queries.push(name);
+  let rid = null;
+  for (const q of queries) {
+    try {
+      const su = "https://search.kuwo.cn/r.s?client=kt&all=" + encodeURIComponent(q) + "&pn=0&rn=3&ft=music&encoding=utf8&rformat=json&vipver=1&mobi=1";
+      const sr = await fetch(su, { headers: { "User-Agent": MUSIC_UA } });
+      if (!sr.ok) { diag.stage = "K0"; continue; }
+      const sj = await sr.json();
+      const first = (sj.abslist || [])[0];
+      if (first && first.DC_TARGETID) { rid = first.DC_TARGETID; break; }
+      diag.stage = "K1";
+    } catch (e) {
+      console.log("kuwo search err", e);
+      diag.stage = "K0";
+    }
+  }
+  if (!rid) return null;
   try {
-    const kw = encodeURIComponent(((name || "") + " " + (artist || "")).trim());
-    const su = "https://search.kuwo.cn/r.s?client=kt&all=" + kw + "&pn=0&rn=3&ft=music&encoding=utf8&rformat=json&vipver=1&mobi=1";
-    const sr = await fetch(su, { headers: { "User-Agent": MUSIC_UA } });
-    if (!sr.ok) return null;
-    const sj = await sr.json();
-    const first = (sj.abslist || [])[0];
-    const rid = first && first.DC_TARGETID;
-    if (!rid) return null;
     const au = "https://antiserver.kuwo.cn/anti.s?type=convert_url3&rid=MUSIC_" + rid + "&format=mp3&response=url";
     const ar = await fetch(au, { headers: { "User-Agent": MUSIC_UA } });
-    if (!ar.ok) return null;
+    if (!ar.ok) { diag.stage = "K2"; return null; }
     const at = (await ar.text()).trim();
     if (at.startsWith("{")) {
       const aj = JSON.parse(at);
-      return aj.url || null;
+      if (aj.url) return aj.url;
+      diag.stage = "K2";
+      return null;
     }
-    return at.startsWith("http") ? at : null;
+    if (at.startsWith("http")) return at;
+    diag.stage = "K2";
+    return null;
   } catch (e) {
-    console.log("kuwo err", e);
+    console.log("kuwo anti err", e);
+    diag.stage = "K2";
     return null;
   }
 }
@@ -1483,30 +1501,52 @@ async function doMusicPlay(env, chatId, songId) {
   await tg(env, "sendChatAction", { chat_id: chatId, action: "upload_voice" });
   let buf = await fetchAudioBytes("https://music.163.com/song/media/outer/url?id=" + songId + ".mp3");
   let viaKuwo = false;
+  const diag = { stage: "K0" };
   if (!buf) {
-    const ku = await kuwoPlayUrl(name, artist);
+    const ku = await kuwoResolve(name, artist, diag);
     if (ku) {
       buf = await fetchAudioBytes(ku);
       viaKuwo = !!buf;
+      if (!buf) diag.stage = "K3";
     }
   }
   if (!buf) {
-    await sendText(env, chatId, `《${name}》网易云和酷我都拿不到这首的流 (多半是版权限制), 换个版本试试, 比如搜「歌名 DJ版」。`);
+    await sendText(env, chatId, `《${name}》网易云和酷我这次都没拿到流 (多半是版权限制), 换个版本试试。(诊断码 ${diag.stage}, 截图给 Algo 看)`);
     return;
   }
-  const form = new FormData();
-  form.append("chat_id", String(chatId));
-  form.append("title", name.slice(0, 60));
-  if (artist) form.append("performer", artist.slice(0, 60));
-  if (info?.dur) form.append("duration", String(info.dur));
-  form.append("caption", `🎵 ${name}${artist ? " - " + artist : ""}${viaKuwo ? " (酷我源)" : ""}`);
-  form.append("audio", new Blob([buf], { type: "audio/mpeg" }), `${name} - ${artist}.mp3`.slice(0, 80));
+  const caption = `🎵 ${name}${artist ? " - " + artist : ""}${viaKuwo ? " (酷我源)" : ""}`;
+  let sent = false;
   try {
-    const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendAudio`, { method: "POST", body: form });
-    const j = await r.json();
-    if (!j.ok) throw new Error("tg sendAudio " + (j.description || r.status));
+    const vf = new FormData();
+    vf.append("chat_id", String(chatId));
+    if (info?.dur) vf.append("duration", String(info.dur));
+    vf.append("caption", caption);
+    vf.append("voice", new Blob([buf], { type: "audio/mpeg" }), `${name}.mp3`.slice(0, 80));
+    const vr = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendVoice`, { method: "POST", body: vf });
+    const vj = await vr.json();
+    sent = !!vj.ok;
+    if (!sent) console.log("sendVoice not ok", vj.description || vr.status);
   } catch (e) {
-    console.log("sendAudio err", e);
+    console.log("sendVoice err", e);
+  }
+  if (!sent) {
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append("title", name.slice(0, 60));
+    if (artist) form.append("performer", artist.slice(0, 60));
+    if (info?.dur) form.append("duration", String(info.dur));
+    form.append("caption", caption);
+    form.append("audio", new Blob([buf], { type: "audio/mpeg" }), `${name} - ${artist}.mp3`.slice(0, 80));
+    try {
+      const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendAudio`, { method: "POST", body: form });
+      const j = await r.json();
+      if (!j.ok) throw new Error("tg sendAudio " + (j.description || r.status));
+      sent = true;
+    } catch (e) {
+      console.log("sendAudio err", e);
+    }
+  }
+  if (!sent) {
     await sendText(env, chatId, `《${name}》传给你的时候出错了, 再点一次试试。`);
   }
 }
