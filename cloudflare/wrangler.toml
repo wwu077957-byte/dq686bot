@@ -2,8 +2,20 @@ name = "dq686bot"
 main = "worker.js"
 compatibility_date = "2025-01-01"
 
-# 说明:
-# - BOT_KV 绑定请在 Cloudflare 控制台 Settings -> Bindings 里添加 (KV Namespace 现场新建),
-#   绑定名必须叫 BOT_KV。没绑也能跑, 只是没有会话记忆和额度计数。
-# - BOT_TOKEN / GROQ_API_KEY 等密钥在控制台 Settings -> Variables and Secrets 里填,
-#   不要写进这个文件。
+# Workers Builds (Git 集成) 用这个文件部署,内容与线上设置保持一致:
+# - BOT_KV 绑定到 dq686bot-kv
+# - 普通变量 AI_MODEL / ALLOWED_IDS
+# - 两个 Cron: 每日早报 0 0 * * * (UTC, 北京 08:00); 提醒检查 */15 * * * *
+# - 密钥 BOT_TOKEN / GROQ_API_KEY / DEEPSEEK_API_KEY 存在控制台 Secrets 里,
+#   不写进本文件,部署也不会动它们。
+
+[vars]
+AI_MODEL = "openai/gpt-oss-120b"
+ALLOWED_IDS = "8362330268"
+
+[[kv_namespaces]]
+binding = "BOT_KV"
+id = "8d4e32b741cb4a92adc4241ce798ea66"
+
+[triggers]
+crons = ["0 0 * * *", "*/15 * * * *"]
