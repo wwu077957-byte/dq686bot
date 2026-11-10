@@ -205,6 +205,7 @@ async function buildSystem(env, chatId, brainLabel) {
   const personaId = (await kvGet(env, `persona:${chatId}`)) || "default";
   const P = PERSONAS[personaId] || PERSONAS.default;
   if (P.style) lines.push(P.style);
+  lines.push("你自带点歌功能: 主人想听歌时, 他点菜单里的「🎵 音乐」按钮或发 /music 歌名, 你就能把歌以语音形式发给他听。不要说你放不了音乐、只能发文字, 那是错的。");
   const ghost = (await kvGet(env, `ghost:${chatId}`)) === "1";
   if (!ghost) {
     const prefs = await getPrefs(env, chatId);
@@ -223,7 +224,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v5.3)", {
+      return new Response("dq686bot is alive (cloudflare worker v5.4)", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
@@ -1353,9 +1354,12 @@ async function statusText(env, chatId, userId) {
 const MUSIC_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1";
 
 function parseSongAsk(text) {
-  const m = text.match(/^(?:放一首|播放|放|来一首|点歌|点一首|听一首|我想听|我要听|唱一首)[\s:：]*(.+)$/);
+  const t = (text || "").trim();
+  if (/听我说|听我讲|你听我|说说话/.test(t)) return null;
+  const m = t.match(/^(?:帮我|请|麻烦)?(?:放一首|播放|放|来一首|点歌|点一首|听一首|我想听|我要听|唱一首|听歌|放歌|放音乐|听音乐)[\s:：]*(.*)$/);
   if (!m) return null;
-  const q = m[1].trim().replace(/[。！!]+$/, "");
+  let q = (m[1] || "").trim();
+  q = q.replace(/^(音乐|歌曲|歌|曲子)[\s:：]*/, "").replace(/[的了啊呀吧]+$/, "").trim();
   if (!q || q.length > 40) return null;
   if (/[吗呢？?]/.test(q) || q.includes("什么")) return null;
   return q;
@@ -1369,28 +1373,57 @@ async function musicSearch(query) {
   const songs = d?.result?.songs || [];
   return songs.map((s) => ({
     id: String(s.id),
+    key: String(s.id),
+    src: "ne",
     name: s.name || "",
     artist: (s.ar || []).map((a) => a.name).join("/"),
     dur: Math.round((s.dt || 0) / 1000),
   }));
 }
 
+async function kuwoSearchList(query) {
+  const url = "https://search.kuwo.cn/r.s?client=kt&all=" + encodeURIComponent(query) + "&pn=0&rn=10&ft=music&encoding=utf8&rformat=json&vipver=1&mobi=1";
+  const r = await fetch(url, { headers: { "User-Agent": MUSIC_UA } });
+  if (!r.ok) throw new Error("kuwo search http " + r.status);
+  const d = await r.json();
+  const items = d?.abslist || [];
+  const clean = (x) => String(x || "").replace(/&nbsp;/g, " ").replace(/<[^>]*>/g, "").trim();
+  return items
+    .filter((s) => s.DC_TARGETID)
+    .map((s) => ({
+      id: "kw" + s.DC_TARGETID,
+      key: "kw" + s.DC_TARGETID,
+      src: "kw",
+      rid: String(s.DC_TARGETID),
+      name: clean(s.SONGNAME),
+      artist: clean(s.ARTIST),
+      dur: parseInt(s.DURATION || "0", 10) || 0,
+    }));
+}
+
 async function doMusicSearch(env, chatId, userId, query, replyTo) {
   await tg(env, "sendChatAction", { chat_id: chatId, action: "typing" });
   let list = [];
+  let neErr = false;
   try {
     list = await musicSearch(query);
   } catch (e) {
     console.log("music search err", e);
-    await sendText(env, chatId, "音乐源站这会儿连不上, 等下再试。", replyTo);
-    return;
+    neErr = true;
   }
   if (!list.length) {
-    await sendText(env, chatId, `没搜到「${query}」, 换个名字试试。`, replyTo);
+    try {
+      list = await kuwoSearchList(query);
+    } catch (e) {
+      console.log("kuwo search err", e);
+    }
+  }
+  if (!list.length) {
+    await sendText(env, chatId, neErr ? "音乐源站这会儿连不上, 等下再试。" : `没搜到「${query}」, 换个名字试试。`, replyTo);
     return;
   }
   const cache = {};
-  for (const s of list) cache[s.id] = s;
+  for (const s of list) cache[s.key] = s;
   await kvPut(env, `musq:${chatId}`, JSON.stringify(cache), 1800);
   const lines = [`🎯 搜「${query}」找到这些, 点下面的数字按钮, 就发歌给你听:`];
   list.forEach((s, i) => {
@@ -1400,7 +1433,7 @@ async function doMusicSearch(env, chatId, userId, query, replyTo) {
   });
   const rows = [];
   for (let i = 0; i < list.length; i += 5) {
-    rows.push(list.slice(i, i + 5).map((s, j) => ({ text: String(i + j + 1), callback_data: "mus:" + s.id })));
+    rows.push(list.slice(i, i + 5).map((s, j) => ({ text: String(i + j + 1), callback_data: "mus:" + s.key })));
   }
   rows.push([{ text: "🏠 菜单", callback_data: "m:menu" }]);
   await sendText(env, chatId, lines.join(NL), replyTo, { inline_keyboard: rows });
@@ -1423,28 +1456,34 @@ async function fetchAudioBytes(url) {
   }
 }
 
-async function kuwoResolve(name, artist, diag) {
+async function kuwoCandidates(name, artist, diag) {
   const firstArtist = (artist || "").split("/")[0].trim();
   const queries = [];
   const q1 = ((name || "") + " " + firstArtist).trim();
   if (q1) queries.push(q1);
   if (name && name !== q1) queries.push(name);
-  let rid = null;
+  const rids = [];
   for (const q of queries) {
     try {
-      const su = "https://search.kuwo.cn/r.s?client=kt&all=" + encodeURIComponent(q) + "&pn=0&rn=3&ft=music&encoding=utf8&rformat=json&vipver=1&mobi=1";
+      const su = "https://search.kuwo.cn/r.s?client=kt&all=" + encodeURIComponent(q) + "&pn=0&rn=5&ft=music&encoding=utf8&rformat=json&vipver=1&mobi=1";
       const sr = await fetch(su, { headers: { "User-Agent": MUSIC_UA } });
       if (!sr.ok) { diag.stage = "K0"; continue; }
       const sj = await sr.json();
-      const first = (sj.abslist || [])[0];
-      if (first && first.DC_TARGETID) { rid = first.DC_TARGETID; break; }
+      for (const it of sj.abslist || []) {
+        const rid = it && it.DC_TARGETID;
+        if (rid && !rids.includes(String(rid))) rids.push(String(rid));
+      }
+      if (rids.length) break;
       diag.stage = "K1";
     } catch (e) {
       console.log("kuwo search err", e);
       diag.stage = "K0";
     }
   }
-  if (!rid) return null;
+  return rids.slice(0, 4);
+}
+
+async function kuwoUrlByRid(rid, diag) {
   try {
     const au = "https://antiserver.kuwo.cn/anti.s?type=convert_url3&rid=MUSIC_" + rid + "&format=mp3&response=url";
     const ar = await fetch(au, { headers: { "User-Agent": MUSIC_UA } });
@@ -1464,6 +1503,50 @@ async function kuwoResolve(name, artist, diag) {
     diag.stage = "K2";
     return null;
   }
+}
+
+function estimateMp3Seconds(buf) {
+  try {
+    const b = new Uint8Array(buf);
+    let off = 0;
+    if (b.length > 10 && b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33) {
+      off = 10 + ((b[6] & 0x7f) << 21) + ((b[7] & 0x7f) << 14) + ((b[8] & 0x7f) << 7) + (b[9] & 0x7f);
+    }
+    const brV1 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
+    const brV2 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0];
+    const end = Math.min(b.length - 4, off + 65536);
+    for (let i = off; i < end; i++) {
+      if (b[i] === 0xff && (b[i + 1] & 0xe0) === 0xe0) {
+        const ver = (b[i + 1] >> 3) & 0x3;
+        const layer = (b[i + 1] >> 1) & 0x3;
+        if (layer !== 1) continue;
+        const bri = (b[i + 2] >> 4) & 0xf;
+        const br = ver === 3 ? brV1[bri] : brV2[bri];
+        if (!br) continue;
+        return Math.round(((b.length - i) * 8) / (br * 1000));
+      }
+    }
+    return 0;
+  } catch (e) {
+    return 0;
+  }
+}
+
+function streamPlausible(buf, expectSec) {
+  const est = estimateMp3Seconds(buf);
+  if (!est) return true;
+  if (expectSec && expectSec >= 60) return est >= expectSec * 0.5 && est <= expectSec * 2.5;
+  return est >= 40;
+}
+
+async function fetchSongBuf(url, expectSec, diag) {
+  const buf = await fetchAudioBytes(url);
+  if (!buf) return null;
+  if (!streamPlausible(buf, expectSec)) {
+    diag.stage = "K5";
+    return null;
+  }
+  return buf;
 }
 
 async function ensureBotCommands(env) {
@@ -1499,19 +1582,29 @@ async function doMusicPlay(env, chatId, songId) {
   const name = info?.name || "未知歌曲";
   const artist = info?.artist || "";
   await tg(env, "sendChatAction", { chat_id: chatId, action: "upload_voice" });
-  let buf = await fetchAudioBytes("https://music.163.com/song/media/outer/url?id=" + songId + ".mp3");
-  let viaKuwo = false;
   const diag = { stage: "K0" };
+  const expect = info?.dur || 0;
+  let buf = null;
+  let viaKuwo = false;
+  if (info?.src === "kw" && info?.rid) {
+    const u = await kuwoUrlByRid(info.rid, diag);
+    if (u) buf = await fetchSongBuf(u, expect, diag);
+    if (buf) viaKuwo = true;
+  } else {
+    buf = await fetchSongBuf("https://music.163.com/song/media/outer/url?id=" + songId + ".mp3", expect, diag);
+  }
   if (!buf) {
-    const ku = await kuwoResolve(name, artist, diag);
-    if (ku) {
-      buf = await fetchAudioBytes(ku);
-      viaKuwo = !!buf;
-      if (!buf) diag.stage = "K3";
+    const cands = await kuwoCandidates(name, artist, diag);
+    for (const rid of cands) {
+      if (info?.src === "kw" && String(info.rid) === rid) continue;
+      const u = await kuwoUrlByRid(rid, diag);
+      if (!u) continue;
+      buf = await fetchSongBuf(u, expect, diag);
+      if (buf) { viaKuwo = true; break; }
     }
   }
   if (!buf) {
-    await sendText(env, chatId, `《${name}》网易云和酷我这次都没拿到流 (多半是版权限制), 换个版本试试。(诊断码 ${diag.stage}, 截图给 Algo 看)`);
+    await sendText(env, chatId, `《${name}》网易云和酷我这次都没拿到能放的完整版 (多半是版权限制), 换个版本试试。(诊断码 ${diag.stage}, 截图给 Algo 看)`);
     return;
   }
   const caption = `🎵 ${name}${artist ? " - " + artist : ""}${viaKuwo ? " (酷我源)" : ""}`;
@@ -1519,7 +1612,9 @@ async function doMusicPlay(env, chatId, songId) {
   try {
     const vf = new FormData();
     vf.append("chat_id", String(chatId));
-    if (info?.dur) vf.append("duration", String(info.dur));
+    const estSec = estimateMp3Seconds(buf);
+    if (estSec) vf.append("duration", String(estSec));
+    else if (info?.dur) vf.append("duration", String(info.dur));
     vf.append("caption", caption);
     vf.append("voice", new Blob([buf], { type: "audio/mpeg" }), `${name}.mp3`.slice(0, 80));
     const vr = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendVoice`, { method: "POST", body: vf });
@@ -1651,6 +1746,8 @@ async function handleCallback(env, cq) {
 
 // ---------- 消息处理 ----------
 async function handleUpdate(env, update) {
+  const uid0 = update.callback_query?.from?.id || update.message?.from?.id || update.channel_post?.from?.id;
+  if (uid0 != null && (await isAllowed(env, uid0))) await ensureBotCommands(env);
   if (update.callback_query) {
     await handleCallback(env, update.callback_query);
     return;
