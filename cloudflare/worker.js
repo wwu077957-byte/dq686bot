@@ -70,6 +70,7 @@ const HELP = `我是小多, 多情的私人 AI 助手。
 /tool - 🧩 现做一个消息里能点的小工具 (例: /tool AA分账计算器)
 /topics - 🧵 话题工作台 (一键建 工作/日常/灵感/临时 四个独立话题, 记忆互不串)
 /stickers - 🎴 我学会的贴纸 (直接发贴纸教我)
+/addpack - 🎴 整包添加表情包 (把 t.me/addstickers 链接直接发聊天里也行)
 /music 歌名 - 搜歌点歌 (点结果里的数字就发歌; 也可直接说 放+歌名)
 /morning - 今日早报
 /myid - 我的 Telegram 数字 ID
@@ -1752,6 +1753,11 @@ async function statusText(env, chatId, userId) {
 // ---------- 音乐点歌 (网易云搜索 + 源站音频直发) ----------
 const MUSIC_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1";
 
+function isBareMusicAsk(t) {
+  const x = (t || "").trim().replace(/[\s。！!？?]+$/g, "");
+  return /^(帮我|请|麻烦)?(放一?首|播放|放|来一首|点一?首|点歌|听一首|听歌|放歌|放音乐|听音乐|我想听歌?|我要听歌?|唱一首)(音乐|歌|一首歌)?$/.test(x);
+}
+
 function parseSongAsk(text) {
   const t = (text || "").trim();
   if (/听我说|听我讲|你听我|说说话/.test(t)) return null;
@@ -1824,7 +1830,8 @@ async function doMusicSearch(env, chatId, userId, query, replyTo) {
   const cache = {};
   for (const s of list) cache[s.key] = s;
   await kvPut(env, `musq:${chatId}`, JSON.stringify(cache), 1800);
-  const lines = [`🎯 搜「${query}」找到这些, 点下面的数字按钮, 就发歌给你听:`];
+  await kvPut(env, `musord:${chatId}`, JSON.stringify(list.map((s) => s.key)), 1800);
+  const lines = [`🎯 搜「${query}」找到这些, 点下面的数字按钮, 或者直接回我第几个, 歌以文件发给你:`];
   list.forEach((s, i) => {
     const mm = Math.floor(s.dur / 60);
     const ss = String(s.dur % 60).padStart(2, "0");
@@ -1982,7 +1989,7 @@ function keepTyping(env, chatId, action, threadId) {
 
 async function ensureBotCommands(env) {
   try {
-    if (await kvGet(env, "sys:cmdset6")) return;
+    if (await kvGet(env, "sys:cmdset7")) return;
     await tg(env, "setMyCommands", {
       commands: [
         { command: "start", description: "🏠 打开菜单" },
@@ -2002,11 +2009,12 @@ async function ensureBotCommands(env) {
         { command: "auto", description: "🤖 智能选模型开关" },
         { command: "incognito", description: "🕶️ 假装失忆开关" },
         { command: "stickers", description: "🎴 我学会的贴纸" },
+        { command: "addpack", description: "🎴 整包添加表情包" },
         { command: "export", description: "📦 导出我的记忆" },
         { command: "myid", description: "🆔 我的数字 ID" },
       ],
     });
-    await kvPut(env, "sys:cmdset6", "1", 604800);
+    await kvPut(env, "sys:cmdset7", "1", 604800);
   } catch (e) {
     console.log("cmdset err", e);
   }
@@ -2054,37 +2062,39 @@ async function doMusicPlay(env, chatId, songId) {
     return;
   }
   const caption = `🎵 ${name}${artist ? " - " + artist : ""}${viaKuwo ? " (酷我源)" : ""}`;
+  const estSec = estimateMp3Seconds(buf);
+  // v6.3: 先按音乐文件发 (带歌名/歌手, 能存能转), 失败再退语音条
   let sent = false;
   try {
-    const vf = new FormData();
-    vf.append("chat_id", String(chatId));
-    const estSec = estimateMp3Seconds(buf);
-    if (estSec) vf.append("duration", String(estSec));
-    else if (info?.dur) vf.append("duration", String(info.dur));
-    vf.append("caption", caption);
-    vf.append("voice", new Blob([buf], { type: "audio/mpeg" }), `${name}.mp3`.slice(0, 80));
-    const vr = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendVoice`, { method: "POST", body: vf });
-    const vj = await vr.json();
-    sent = !!vj.ok;
-    if (!sent) console.log("sendVoice not ok", vj.description || vr.status);
-  } catch (e) {
-    console.log("sendVoice err", e);
-  }
-  if (!sent) {
     const form = new FormData();
     form.append("chat_id", String(chatId));
     form.append("title", name.slice(0, 60));
     if (artist) form.append("performer", artist.slice(0, 60));
-    if (info?.dur) form.append("duration", String(info.dur));
+    if (estSec) form.append("duration", String(estSec));
+    else if (info?.dur) form.append("duration", String(info.dur));
     form.append("caption", caption);
     form.append("audio", new Blob([buf], { type: "audio/mpeg" }), `${name} - ${artist}.mp3`.slice(0, 80));
+    const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendAudio`, { method: "POST", body: form });
+    const j = await r.json();
+    if (!j.ok) throw new Error("tg sendAudio " + (j.description || r.status));
+    sent = true;
+  } catch (e) {
+    console.log("sendAudio err", e);
+  }
+  if (!sent) {
     try {
-      const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendAudio`, { method: "POST", body: form });
-      const j = await r.json();
-      if (!j.ok) throw new Error("tg sendAudio " + (j.description || r.status));
-      sent = true;
+      const vf = new FormData();
+      vf.append("chat_id", String(chatId));
+      if (estSec) vf.append("duration", String(estSec));
+      else if (info?.dur) vf.append("duration", String(info.dur));
+      vf.append("caption", caption);
+      vf.append("voice", new Blob([buf], { type: "audio/mpeg" }), `${name}.mp3`.slice(0, 80));
+      const vr = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendVoice`, { method: "POST", body: vf });
+      const vj = await vr.json();
+      sent = !!vj.ok;
+      if (!sent) console.log("sendVoice not ok", vj.description || vr.status);
     } catch (e) {
-      console.log("sendAudio err", e);
+      console.log("sendVoice err", e);
     }
   }
   if (!sent) {
@@ -2220,7 +2230,7 @@ async function handleSticker(env, chatId, userId, msg, threadId) {
   const pool = await getStickerPool(env, chatId);
   if (st.file_id && !pool.some((x) => x.f === st.file_id)) {
     pool.push({ f: st.file_id, e: st.emoji || "" });
-    while (pool.length > 60) pool.shift();
+    while (pool.length > 300) pool.shift();
     await kvPut(env, `stk:${chatId}`, JSON.stringify(pool), 60 * 60 * 24 * 30);
   }
   const first = (await kvGet(env, `stkhi:${chatId}`)) !== "1";
@@ -2262,6 +2272,23 @@ async function maybeMoodSticker(env, chatId, threadId, userText, replyText) {
     });
     await kvPut(env, `stkcd:${chatId}`, String(Date.now()), 300);
   } catch {}
+}
+
+async function addStickerPack(env, chatId, name) {
+  const res = await tg(env, "getStickerSet", { name });
+  const set = res?.result;
+  if (!set || !Array.isArray(set.stickers)) return { ok: false };
+  const pool = await getStickerPool(env, chatId);
+  let added = 0;
+  for (const st of set.stickers) {
+    if (st.file_id && !pool.some((x) => x.f === st.file_id)) {
+      pool.push({ f: st.file_id, e: st.emoji || "" });
+      added++;
+    }
+  }
+  while (pool.length > 300) pool.shift();
+  await kvPut(env, `stk:${chatId}`, JSON.stringify(pool), 60 * 60 * 24 * 30);
+  return { ok: true, title: set.title || name, added, total: pool.length };
 }
 
 // ---------- v6.1 话题工作台: 一键建预设话题 ----------
@@ -2583,13 +2610,30 @@ async function handleUpdate(env, update) {
     await sendText(env, chatId, "在呢, 喊一声就应 👋 我是小多。直接发消息跟我聊; 输入框下面有一排常驻按钮, 点着用就行 👇", undefined, REPLY_KB);
     return;
   }
+  if (text.startsWith("/addpack")) {
+    const arg = text.slice("/addpack".length).trim();
+    const m = arg.match(/addstickers\/([A-Za-z0-9_]+)/) || arg.match(/^([A-Za-z0-9_]+)$/);
+    if (!m) {
+      await sendText(env, chatId, "把表情包链接发我就行, 比如直接发 https://t.me/addstickers/xxx 到聊天里, 我自动整包装下。");
+      return;
+    }
+    const r = await addStickerPack(env, chatId, m[1]);
+    await sendText(
+      env,
+      chatId,
+      r.ok
+        ? `「${r.title}」装好了 🎴 新增 ${r.added} 张, 我现在一共会 ${r.total} 张贴纸。`
+        : "这个包没拉下来, 链接或包名可能不对。"
+    );
+    return;
+  }
   if (text.startsWith("/stickers")) {
     const pool = await getStickerPool(env, chatId);
     await sendText(
       env,
       chatId,
       pool.length
-        ? `我已经跟你学会 ${pool.length} 张贴纸了 😎 聊天对上心情的时候我会自己发。再给我发贴纸, 我还能继续学 (最多记 60 张)。`
+        ? `我已经跟你学会 ${pool.length} 张贴纸了 😎 聊天对上心情的时候我会自己发。再给我发贴纸, 我还能继续学 (最多记 300 张)。`
         : "我还没学会任何贴纸。你直接给我发一张贴纸, 我就学会了, 以后也会发贴纸陪你聊。"
     );
     return;
@@ -2957,6 +3001,24 @@ async function handleUpdate(env, update) {
     return;
   }
 
+  // 聊天里直接发 addstickers 链接: 整包自动装下 (v6.3)
+  if (chatType === "private") {
+    const packNames = [...new Set([...text.matchAll(/addstickers\/([A-Za-z0-9_]+)/g)].map((x) => x[1]))];
+    if (packNames.length) {
+      for (const name of packNames) {
+        const r = await addStickerPack(env, chatId, name);
+        await sendText(
+          env,
+          chatId,
+          r.ok
+            ? `「${r.title}」整包装下了 🎴 新增 ${r.added} 张, 我现在一共会 ${r.total} 张贴纸。`
+            : `「${name}」这个包没拉下来, 链接可能不对。`
+        );
+      }
+      return;
+    }
+  }
+
   // ----- 输入框下方常驻按钮 (回复键盘): 文本按钮路由 (v6.2) -----
   if (chatType === "private" && !text.startsWith("/")) {
     const kbAct = {
@@ -3030,6 +3092,33 @@ async function handleUpdate(env, update) {
   if (awaitMusic) {
     if (env.BOT_KV) await env.BOT_KV.delete(`awaitmusic:${chatId}`);
     await doMusicSearch(env, chatId, userId, text, msg.message_id);
+    return;
+  }
+
+  // 点歌列表出来后, 打字回数字也行 (v6.3)
+  const numPick = text.match(/^第?\s*(\d{1,2})\s*个?$/);
+  if (numPick) {
+    let ord = null;
+    try {
+      ord = JSON.parse((await kvGet(env, `musord:${chatId}`)) || "null");
+    } catch {
+      ord = null;
+    }
+    if (Array.isArray(ord) && ord.length) {
+      const idx = parseInt(numPick[1], 10) - 1;
+      if (idx >= 0 && idx < ord.length) {
+        await doMusicPlay(env, chatId, ord[idx]);
+      } else {
+        await sendText(env, chatId, `刚才那份列表里只有 ${ord.length} 首, 没有第 ${numPick[1]} 个。`);
+      }
+      return;
+    }
+  }
+
+  // 只说放音乐/听歌没给歌名: 先问歌名 (v6.3)
+  if (isBareMusicAsk(text)) {
+    await kvPut(env, `awaitmusic:${chatId}`, "1", 300);
+    await sendText(env, chatId, "想听歌是吧 🎵 直接发歌名给我, 我搜出来你挑第几个。");
     return;
   }
 
