@@ -51,7 +51,7 @@ const HELP = `我是小多, 多情的私人 AI 助手。
 /persona - 换人设 (代码助手 / 故事编剧 / 翻译官 / 毒舌损友)
 /check - 自检四个大脑的死活和延迟
 /arena 问题 - 两个模型同答, 并排对比
-/retry - 换个模型重答上一题 (回复下面也有按钮)
+/retry - 换个模型重答上一题
 
 【工具】
 /draw 描述 - 画图
@@ -628,9 +628,8 @@ async function reactTo(env, chatId, messageId, emoji) {
 async function deliverStreamReply(env, chatId, reply, userText, quoteOpts, threadId) {
   const blocks = extractBlocks(reply);
   if (blocks.length) await kvPut(env, `lastcode:${chatId}`, JSON.stringify(blocks), 60 * 60);
-  const kb = replyKb(blocks.length > 0);
-  const sent = await sendRich(env, chatId, reply, kb, quoteOpts, threadId);
-  if (!sent) await sendText(env, chatId, reply, undefined, kb, true, threadId);
+  const sent = await sendRich(env, chatId, reply, undefined, quoteOpts, threadId);
+  if (!sent) await sendText(env, chatId, reply, undefined, undefined, true, threadId);
   const wantFile = (userText || "").includes("文件");
   const huge = blocks.some((b) => b.code.length > 3000);
   if (blocks.length && (wantFile || huge)) await sendBlocksAsFiles(env, chatId, blocks);
@@ -1105,10 +1104,10 @@ async function deliverAiReply(env, chatId, phId, reply, userText) {
       await sendBlocksAsFiles(env, chatId, blocks);
       return;
     }
-    await editOrSend(env, chatId, phId, reply, replyKb(true), true);
+    await editOrSend(env, chatId, phId, reply, undefined, true);
     return;
   }
-  await editOrSend(env, chatId, phId, reply, replyKb(false), true);
+  await editOrSend(env, chatId, phId, reply, undefined, true);
 }
 
 function chatErrorText(e) {
