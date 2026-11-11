@@ -264,7 +264,73 @@ export default {
 
 
 // ---------- v5.8 高级面板 (Bot API 10.4 Widget) ----------
-const PANEL_HTML = `' + WIDGET_HTML + '`;
+const PANEL_HTML = `<style>
+body{margin:0;font-family:-apple-system,sans-serif}
+.hd{display:flex;align-items:center;gap:9px;padding:2px 0 6px}
+.logo{width:36px;height:36px;border-radius:11px;background:#1F6B52;color:#fff;display:flex;align-items:center;justify-content:center;font-size:19px}
+.tt{font-size:16px;font-weight:700}
+.st{font-size:12px;color:var(--tg-theme-hint-color)}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 10px}
+.chip{background:var(--tg-theme-secondary-bg-color);border-radius:999px;padding:4px 10px;font-size:12px}
+.cny{background:linear-gradient(135deg,#b91c1c,#dc2626);color:#fff;border-radius:14px;padding:12px;text-align:center;margin-bottom:10px;font-size:15px}
+.cny b{font-size:30px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+button{border:0;border-radius:12px;padding:12px 6px;font-size:15px;background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-text-color)}
+button:active{opacity:.55}
+.main{background:#1F6B52;color:#fff}
+.wide{width:100%;margin-top:8px}
+.msg{text-align:center;font-size:13px;color:var(--tg-theme-hint-color);min-height:18px;padding-top:8px}
+</style>
+<div class="hd"><div class="logo">✨</div><div><div class="tt">小多 · 高级面板</div><div class="st" id="dt"></div></div></div>
+<div id="home">
+<div class="chips"><span class="chip">🟢 在线</span><span class="chip" id="c2"></span><span class="chip" id="c3"></span></div>
+<div class="cny">🧧 距离过年还有 <b id="cny">--</b> 天</div>
+<div class="grid">
+<button class="main" id="bBrief">☀️ 今日早报</button>
+<button id="bMusic">🎵 点歌</button>
+<button id="bPersona">🎭 换人设</button>
+<button id="bNew">🆕 新话题</button>
+</div>
+</div>
+<div id="persona" style="display:none">
+<div class="grid" id="plist"></div>
+<button class="wide" id="bBack">↩️ 返回面板</button>
+</div>
+<div class="msg" id="msg"></div>
+<script>
+var S={};
+var PS=[['default','😎 小多本人'],['coder','👨‍💻 代码助手'],['story','📖 故事编剧'],['translator','🌐 翻译官'],['roast','😏 毒舌损友']];
+function parse(s){try{return JSON.parse(s||'{}')}catch(e){return{}}}
+function draw(read){
+ if(read)S=parse(TelegramWidget.chatData);
+ document.getElementById('dt').textContent=S.dt||'';
+ document.getElementById('c2').textContent='🎭 '+(S.pn||'小多本人');
+ document.getElementById('c3').textContent='📊 今日 '+(S.use||0)+'/'+(S.mx||100);
+ document.getElementById('cny').textContent=(S.cny==null?'--':S.cny);
+ var per=(S.pg==='persona');
+ document.getElementById('home').style.display=per?'none':'block';
+ document.getElementById('persona').style.display=per?'block':'none';
+ if(per){
+  var h='';
+  for(var i=0;i<PS.length;i++)h+='<button data-ps="'+PS[i][0]+'">'+PS[i][1]+'</button>';
+  document.getElementById('plist').innerHTML=h;
+  var bs=document.querySelectorAll('[data-ps]');
+  for(var j=0;j<bs.length;j++)bs[j].onclick=function(){say('换好啦 🎭');req('ps:'+this.getAttribute('data-ps'))};
+ }
+}
+function say(t){document.getElementById('msg').textContent=t||''}
+function apply(a){if(a&&a.result){var n=parse(a.result);if(n&&(n.pg||n.pn)){S=n;draw(false)}}}
+function req(d){TelegramWidget.request(d).then(function(a){apply(a)},function(e){say('出错了, 再点一次试试')})}
+document.getElementById('bBrief').onclick=function(){say('早报在下面 👇');req('act:brief')};
+document.getElementById('bMusic').onclick=function(){say('在下面直接发歌名就行 🎵');req('act:music')};
+document.getElementById('bPersona').onclick=function(){req('pg:persona')};
+document.getElementById('bNew').onclick=function(){say('记忆清空啦, 重新聊 🆕');req('act:new')};
+document.getElementById('bBack').onclick=function(){req('pg:home')};
+if(TelegramWidget.onEvent)TelegramWidget.onEvent('chatDataChanged',function(){draw(true)});
+draw(true);
+TelegramWidget.request('refresh').then(function(a){apply(a)},function(e){});
+if(TelegramWidget.ready)TelegramWidget.ready();
+</script>`;
 
 async function panelState(env, chatId, userId, pg) {
   const personaId = (await kvGet(env, `persona:${chatId}`)) || "default";
