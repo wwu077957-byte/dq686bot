@@ -69,11 +69,12 @@ const HELP = `我是小多, 多情的私人 AI 助手。
 /model - 🧠 看当前用的哪个模型 / 换模型
 /tool - 🧩 现做一个消息里能点的小工具 (例: /tool AA分账计算器)
 /topics - 🧵 话题工作台 (一键建 工作/日常/灵感/临时 四个独立话题, 记忆互不串)
+/stickers - 🎴 我学会的贴纸 (直接发贴纸教我)
 /music 歌名 - 搜歌点歌 (点结果里的数字就发歌; 也可直接说 放+歌名)
 /morning - 今日早报
 /myid - 我的 Telegram 数字 ID
 
-点菜单按钮也能办大部分事, 不用记命令。`;
+点菜单按钮也能办大部分事, 不用记命令。输入框下面还有一排常驻按钮; 直接给我发贴纸, 我会学会, 聊天对上心情时也会回你一张。`;
 
 const MENU_KB = {
   inline_keyboard: [
@@ -103,6 +104,18 @@ const MENU_KB = {
       { text: "🆔 我的ID", callback_data: "m:myid" },
     ],
   ],
+};
+
+// 输入框下方常驻按钮 (回复键盘): 点了就是发一条同名文本, 由 handleUpdate 路由
+const REPLY_KB = {
+  keyboard: [
+    [{ text: "✨ 高级面板" }, { text: "🎵 点歌" }],
+    [{ text: "🧠 当前模型" }, { text: "☀️ 今日早报" }],
+    [{ text: "🧵 话题" }, { text: "🎨 画图" }],
+    [{ text: "🆕 新话题" }, { text: "❓ 帮助" }],
+  ],
+  resize_keyboard: true,
+  is_persistent: true,
 };
 
 const MODEL_KB = {
@@ -1947,7 +1960,7 @@ function keepTyping(env, chatId, action) {
 
 async function ensureBotCommands(env) {
   try {
-    if (await kvGet(env, "sys:cmdset5")) return;
+    if (await kvGet(env, "sys:cmdset6")) return;
     await tg(env, "setMyCommands", {
       commands: [
         { command: "start", description: "🏠 打开菜单" },
@@ -1961,9 +1974,17 @@ async function ensureBotCommands(env) {
         { command: "tool", description: "🧩 现做一个小工具" },
         { command: "topics", description: "🧵 话题工作台" },
         { command: "model", description: "🧠 当前模型 / 换模型" },
+        { command: "persona", description: "🎭 换人设" },
+        { command: "morning", description: "☀️ 今日早报" },
+        { command: "draw", description: "🎨 画图" },
+        { command: "auto", description: "🤖 智能选模型开关" },
+        { command: "incognito", description: "🕶️ 假装失忆开关" },
+        { command: "stickers", description: "🎴 我学会的贴纸" },
+        { command: "export", description: "📦 导出我的记忆" },
+        { command: "myid", description: "🆔 我的数字 ID" },
       ],
     });
-    await kvPut(env, "sys:cmdset5", "1", 604800);
+    await kvPut(env, "sys:cmdset6", "1", 604800);
   } catch (e) {
     console.log("cmdset err", e);
   }
@@ -2150,6 +2171,75 @@ async function handleCallback(env, cq) {
     }
     await setBrain(env, chatId, brain);
   }
+}
+
+// ---------- v6.2 贴纸: 跟用户学贴纸, 按心情回贴纸 ----------
+const MOOD_STICKERS = [
+  { keys: ["哈哈", "笑死", "乐死", "好笑", "太逗"], emojis: ["😂", "🤣", "😄", "😆", "😁"] },
+  { keys: ["晚安", "睡觉", "睡了", "困了"], emojis: ["😴", "🥱", "🌙"] },
+  { keys: ["谢谢", "感谢", "辛苦了"], emojis: ["🙏", "❤️", "😊", "🥰"] },
+  { keys: ["喜欢", "爱你", "抱抱", "亲亲"], emojis: ["❤️", "😍", "🥰", "😘"] },
+  { keys: ["难过", "伤心", "哭了", "呜呜", "委屈"], emojis: ["😢", "😭", "🥺", "😿"] },
+  { keys: ["生气", "气死", "烦死", "无语"], emojis: ["😡", "😤", "🤬", "🙄"] },
+  { keys: ["饿了", "吃饭", "干饭", "好吃"], emojis: ["😋", "🍔", "🍜", "🍗"] },
+  { keys: ["累了", "好累", "困死"], emojis: ["😩", "🥱", "😪"] },
+];
+
+async function getStickerPool(env, chatId) {
+  try {
+    return JSON.parse((await kvGet(env, `stk:${chatId}`)) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+async function handleSticker(env, chatId, userId, msg, threadId) {
+  const st = msg.sticker || {};
+  const pool = await getStickerPool(env, chatId);
+  if (st.file_id && !pool.some((x) => x.f === st.file_id)) {
+    pool.push({ f: st.file_id, e: st.emoji || "" });
+    while (pool.length > 60) pool.shift();
+    await kvPut(env, `stk:${chatId}`, JSON.stringify(pool), 60 * 60 * 24 * 30);
+  }
+  const first = (await kvGet(env, `stkhi:${chatId}`)) !== "1";
+  if (first) {
+    await kvPut(env, `stkhi:${chatId}`, "1", 60 * 60 * 24 * 30);
+    await sendText(env, chatId, "这张贴纸我学会啦 😎 你发我的贴纸我都会攒下来, 以后聊天对上心情, 我也会发贴纸陪你玩。", msg.message_id, undefined, false, threadId);
+    return;
+  }
+  const others = pool.filter((x) => x.f !== st.file_id);
+  const srcPool = others.length ? others : pool;
+  if (srcPool.length && Math.random() < 0.75) {
+    const pick = srcPool[Math.floor(Math.random() * srcPool.length)];
+    await tg(env, "sendSticker", {
+      chat_id: chatId,
+      sticker: pick.f,
+      ...(threadId ? { message_thread_id: threadId } : {}),
+    });
+  } else {
+    await reactTo(env, chatId, msg.message_id, "😍");
+  }
+}
+
+async function maybeMoodSticker(env, chatId, threadId, userText, replyText) {
+  try {
+    const hay = `${userText || ""} ${replyText || ""}`;
+    const hit = MOOD_STICKERS.find((m) => m.keys.some((k) => hay.includes(k)));
+    if (!hit) return;
+    const last = parseInt((await kvGet(env, `stkcd:${chatId}`)) || "0", 10);
+    if (Date.now() - last < 120000) return;
+    const pool = await getStickerPool(env, chatId);
+    const cands = pool.filter((x) => hit.emojis.includes(x.e));
+    if (!cands.length) return;
+    if (Math.random() > 0.65) return;
+    const pick = cands[Math.floor(Math.random() * cands.length)];
+    await tg(env, "sendSticker", {
+      chat_id: chatId,
+      sticker: pick.f,
+      ...(threadId ? { message_thread_id: threadId } : {}),
+    });
+    await kvPut(env, `stkcd:${chatId}`, String(Date.now()), 300);
+  } catch {}
 }
 
 // ---------- v6.1 话题工作台: 一键建预设话题 ----------
@@ -2436,6 +2526,12 @@ async function handleUpdate(env, update) {
     return;
   }
 
+  // ----- 贴纸: 学下来并回应 (v6.2) -----
+  if (msg.sticker) {
+    await handleSticker(env, chatId, userId, msg, threadId);
+    return;
+  }
+
   if (!text) return;
 
   if (text.startsWith("/start")) {
@@ -2455,7 +2551,18 @@ async function handleUpdate(env, update) {
       await sendText(env, chatId, "🧩 造工具模式开好了: 说你想要个什么小工具 (比如 AA 分账计算器、掷骰子、倒计时牌), 我现写一个能点的发你。");
       return;
     }
-    await sendText(env, chatId, "在呢, 喊一声就应 👋 我是小多。直接发消息跟我聊, 或者点下面的按钮 👇", undefined, MENU_KB);
+    await sendText(env, chatId, "在呢, 喊一声就应 👋 我是小多。直接发消息跟我聊; 输入框下面有一排常驻按钮, 点着用就行 👇", undefined, REPLY_KB);
+    return;
+  }
+  if (text.startsWith("/stickers")) {
+    const pool = await getStickerPool(env, chatId);
+    await sendText(
+      env,
+      chatId,
+      pool.length
+        ? `我已经跟你学会 ${pool.length} 张贴纸了 😎 聊天对上心情的时候我会自己发。再给我发贴纸, 我还能继续学 (最多记 60 张)。`
+        : "我还没学会任何贴纸。你直接给我发一张贴纸, 我就学会了, 以后也会发贴纸陪你聊。"
+    );
     return;
   }
   if (text.startsWith("/topics")) {
@@ -2821,6 +2928,55 @@ async function handleUpdate(env, update) {
     return;
   }
 
+  // ----- 输入框下方常驻按钮 (回复键盘): 文本按钮路由 (v6.2) -----
+  if (chatType === "private" && !text.startsWith("/")) {
+    const kbAct = {
+      "✨ 高级面板": "panel",
+      "🎵 点歌": "music",
+      "🧠 当前模型": "model",
+      "☀️ 今日早报": "morning",
+      "🧵 话题": "topics",
+      "🎨 画图": "draw",
+      "🆕 新话题": "new",
+      "❓ 帮助": "help",
+    }[text];
+    if (kbAct === "panel") {
+      await sendPanel(env, chatId, userId);
+      return;
+    }
+    if (kbAct === "music") {
+      await kvPut(env, `awaitmusic:${chatId}`, "1", 300);
+      await sendText(env, chatId, "想听啥? 直接发歌名给我, 比如: 入戏太深");
+      return;
+    }
+    if (kbAct === "model") {
+      await sendModelPicker(env, chatId);
+      return;
+    }
+    if (kbAct === "morning") {
+      await sendText(env, chatId, await briefingText(env, chatId));
+      return;
+    }
+    if (kbAct === "topics") {
+      await setupTopics(env, chatId, userId);
+      return;
+    }
+    if (kbAct === "draw") {
+      await kvPut(env, `awaitdraw:${chatId}`, "1", 300);
+      await sendText(env, chatId, "想画啥? 直接发一句描述给我就行, 比如: 一只在海边看日落的橘猫");
+      return;
+    }
+    if (kbAct === "new") {
+      if (env.BOT_KV) await env.BOT_KV.delete(memKey);
+      await sendText(env, chatId, threadId ? "这个话题的记忆清空了, 咱重新聊。" : "记忆清空了, 咱重新聊。");
+      return;
+    }
+    if (kbAct === "help") {
+      await sendText(env, chatId, HELP, undefined, MENU_KB);
+      return;
+    }
+  }
+
   // 深链接模式: 等总结材料中 -> 把下一条内容改写成总结任务, 继续走正常流程
   const awaitSum = await kvGet(env, `awaitsum:${chatId}`);
   if (awaitSum && !text.startsWith("/")) {
@@ -2940,6 +3096,7 @@ async function handleUpdate(env, update) {
         : null;
     await deliverStreamReply(env, chatId, finalText, text, quoteOpts, threadId);
     await reactTo(env, chatId, msg.message_id, wasStopped ? "👌" : "👍");
+    if (!wasStopped) await maybeMoodSticker(env, chatId, threadId, text, finalText);
   } catch (e) {
     console.log("stream chat err, fallback", e);
     if (!streamed) {
