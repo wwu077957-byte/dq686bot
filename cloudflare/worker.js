@@ -229,7 +229,7 @@ async function buildSystem(env, chatId, brainLabel) {
   const personaId = (await kvGet(env, `persona:${chatId}`)) || "default";
   const P = PERSONAS[personaId] || PERSONAS.default;
   if (P.style) lines.push(P.style);
-  lines.push("你自带点歌功能: 主人想听歌时, 他点菜单里的「🎵 音乐」按钮或发 /music 歌名, 你就能把歌以语音形式发给他听。不要说你放不了音乐、只能发文字, 那是错的。");
+  lines.push("你自带点歌功能: 主人想听歌时, 他点菜单里的「🎵 音乐」按钮或发 /music 歌名, 你就能把歌以音乐文件的形式发给他听。不要说你放不了音乐、只能发文字, 那是错的。");
   const ghost = (await kvGet(env, `ghost:${chatId}`)) === "1";
   if (!ghost) {
     const prefs = await getPrefs(env, chatId);
@@ -1806,8 +1806,12 @@ async function kuwoSearchList(query) {
     }));
 }
 
-async function doMusicSearch(env, chatId, userId, query, replyTo) {
-  await tg(env, "sendChatAction", { chat_id: chatId, action: "typing" });
+async function doMusicSearch(env, chatId, userId, query, replyTo, threadId) {
+  await tg(env, "sendChatAction", {
+    chat_id: chatId,
+    action: "typing",
+    ...(threadId ? { message_thread_id: threadId } : {}),
+  });
   let list = [];
   let neErr = false;
   try {
@@ -1824,7 +1828,7 @@ async function doMusicSearch(env, chatId, userId, query, replyTo) {
     }
   }
   if (!list.length) {
-    await sendText(env, chatId, neErr ? "音乐源站这会儿连不上, 等下再试。" : `没搜到「${query}」, 换个名字试试。`, replyTo);
+    await sendText(env, chatId, neErr ? "音乐源站这会儿连不上, 等下再试。" : `没搜到「${query}」, 换个名字试试。`, replyTo, undefined, false, threadId);
     return;
   }
   const cache = {};
@@ -1842,7 +1846,7 @@ async function doMusicSearch(env, chatId, userId, query, replyTo) {
     rows.push(list.slice(i, i + 5).map((s, j) => ({ text: String(i + j + 1), callback_data: "mus:" + s.key })));
   }
   rows.push([{ text: "🏠 菜单", callback_data: "m:menu" }]);
-  await sendText(env, chatId, lines.join(NL), replyTo, { inline_keyboard: rows });
+  await sendText(env, chatId, lines.join(NL), replyTo, { inline_keyboard: rows }, false, threadId);
 }
 
 async function fetchAudioBytes(url) {
@@ -2020,7 +2024,7 @@ async function ensureBotCommands(env) {
   }
 }
 
-async function doMusicPlay(env, chatId, songId) {
+async function doMusicPlay(env, chatId, songId, threadId) {
   let info = null;
   const raw = await kvGet(env, `musq:${chatId}`);
   if (raw) {
@@ -2032,7 +2036,7 @@ async function doMusicPlay(env, chatId, songId) {
   }
   const name = info?.name || "未知歌曲";
   const artist = info?.artist || "";
-  const stopUp = keepTyping(env, chatId, "upload_voice");
+  const stopUp = keepTyping(env, chatId, "upload_voice", threadId);
   const diag = { stage: "K0" };
   const expect = info?.dur || 0;
   let buf = null;
@@ -2058,7 +2062,7 @@ async function doMusicPlay(env, chatId, songId) {
   }
   if (!buf) {
     stopUp();
-    await sendText(env, chatId, `《${name}》网易云和酷我这次都没拿到能放的完整版 (多半是版权限制), 换个版本试试。(诊断码 ${diag.stage}, 截图给 Algo 看)`);
+    await sendText(env, chatId, `《${name}》网易云和酷我这次都没拿到能放的完整版 (多半是版权限制), 换个版本试试。(诊断码 ${diag.stage}, 截图给 Algo 看)`, undefined, undefined, false, threadId);
     return;
   }
   const caption = `🎵 ${name}${artist ? " - " + artist : ""}${viaKuwo ? " (酷我源)" : ""}`;
@@ -2068,6 +2072,7 @@ async function doMusicPlay(env, chatId, songId) {
   try {
     const form = new FormData();
     form.append("chat_id", String(chatId));
+    if (threadId) form.append("message_thread_id", String(threadId));
     form.append("title", name.slice(0, 60));
     if (artist) form.append("performer", artist.slice(0, 60));
     if (estSec) form.append("duration", String(estSec));
@@ -2085,6 +2090,7 @@ async function doMusicPlay(env, chatId, songId) {
     try {
       const vf = new FormData();
       vf.append("chat_id", String(chatId));
+      if (threadId) vf.append("message_thread_id", String(threadId));
       if (estSec) vf.append("duration", String(estSec));
       else if (info?.dur) vf.append("duration", String(info.dur));
       vf.append("caption", caption);
@@ -2098,7 +2104,7 @@ async function doMusicPlay(env, chatId, songId) {
     }
   }
   if (!sent) {
-    await sendText(env, chatId, `《${name}》传给你的时候出错了, 再点一次试试。`);
+    await sendText(env, chatId, `《${name}》传给你的时候出错了, 再点一次试试。`, undefined, undefined, false, threadId);
   }
   stopUp();
 }
@@ -2138,9 +2144,9 @@ async function handleCallback(env, cq) {
     await sendText(env, chatId, "想查哪个仓库? 发我 用户名/仓库名, 比如 wwu077957-byte/dq686bot");
   } else if (data === "m:music") {
     await kvPut(env, `awaitmusic:${chatId}`, "1", 300);
-    await sendText(env, chatId, "想听啥? 直接发歌名给我, 比如: 入戏太深");
+    await sendText(env, chatId, "想听啥? 直接发歌名给我, 比如: 入戏太深", undefined, undefined, false, cq.message?.message_thread_id || undefined);
   } else if (data.startsWith("mus:")) {
-    await doMusicPlay(env, chatId, data.slice(4));
+    await doMusicPlay(env, chatId, data.slice(4), cq.message?.message_thread_id || undefined);
   } else if (data === "m:morning") {
     await sendText(env, chatId, await briefingText(env, chatId));
   } else if (data === "m:topics") {
@@ -2737,7 +2743,7 @@ async function handleUpdate(env, update) {
       await sendText(env, chatId, "想听啥? 直接发歌名给我, 比如: 入戏太深", msg.message_id);
       return;
     }
-    await doMusicSearch(env, chatId, userId, q, msg.message_id);
+    await doMusicSearch(env, chatId, userId, q, msg.message_id, threadId);
     return;
   }
 
@@ -3050,7 +3056,7 @@ async function handleUpdate(env, update) {
     }
     if (kbAct === "music") {
       await kvPut(env, `awaitmusic:${chatId}`, "1", 300);
-      await sendText(env, chatId, "想听啥? 直接发歌名给我, 比如: 入戏太深");
+      await sendText(env, chatId, "想听啥? 直接发歌名给我, 比如: 入戏太深", undefined, undefined, false, threadId);
       return;
     }
     if (kbAct === "model") {
@@ -3104,13 +3110,17 @@ async function handleUpdate(env, update) {
   const awaitMusic = await kvGet(env, `awaitmusic:${chatId}`);
   if (awaitMusic) {
     if (env.BOT_KV) await env.BOT_KV.delete(`awaitmusic:${chatId}`);
-    await doMusicSearch(env, chatId, userId, text, msg.message_id);
+    await doMusicSearch(env, chatId, userId, text, msg.message_id, threadId);
     return;
   }
 
-  // 点歌列表出来后, 打字回数字也行 (v6.3)
-  const numPick = text.match(/^第?\s*(\d{1,2})\s*个?$/);
-  if (numPick) {
+  // 点歌列表出来后, 打字回第几个也行: 数字/中文数字/带尾巴都认 (v6.3.2)
+  let pickNo = null;
+  const pmA = text.match(/^第?\s*(\d{1,2})\s*个?$/);
+  const pmB = text.length <= 8 ? text.match(/第\s*([一二两三四五六七八九十])\s*个/) : null;
+  if (pmA) pickNo = parseInt(pmA[1], 10);
+  else if (pmB) pickNo = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 }[pmB[1]];
+  if (pickNo != null) {
     let ord = null;
     try {
       ord = JSON.parse((await kvGet(env, `musord:${chatId}`)) || "null");
@@ -3118,11 +3128,11 @@ async function handleUpdate(env, update) {
       ord = null;
     }
     if (Array.isArray(ord) && ord.length) {
-      const idx = parseInt(numPick[1], 10) - 1;
+      const idx = pickNo - 1;
       if (idx >= 0 && idx < ord.length) {
-        await doMusicPlay(env, chatId, ord[idx]);
+        await doMusicPlay(env, chatId, ord[idx], threadId);
       } else {
-        await sendText(env, chatId, `刚才那份列表里只有 ${ord.length} 首, 没有第 ${numPick[1]} 个。`);
+        await sendText(env, chatId, `刚才那份列表里只有 ${ord.length} 首, 没有第 ${pickNo} 个。`, undefined, undefined, false, threadId);
       }
       return;
     }
@@ -3138,7 +3148,7 @@ async function handleUpdate(env, update) {
   // 自然语言点歌: 放/来一首/听 + 歌名
   const songAsk = parseSongAsk(text);
   if (songAsk) {
-    await doMusicSearch(env, chatId, userId, songAsk, msg.message_id);
+    await doMusicSearch(env, chatId, userId, songAsk, msg.message_id, threadId);
     return;
   }
 
