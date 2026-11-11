@@ -2255,16 +2255,29 @@ async function handleSticker(env, chatId, userId, msg, threadId) {
 
 async function maybeMoodSticker(env, chatId, threadId, userText, replyText) {
   try {
+    const pool = await getStickerPool(env, chatId);
+    if (!pool.length) return;
+    const last = parseInt((await kvGet(env, `stkcd:${chatId}`)) || "0", 10);
+    if (Date.now() - last < 60000) return;
     const hay = `${userText || ""} ${replyText || ""}`;
     const hit = MOOD_STICKERS.find((m) => m.keys.some((k) => hay.includes(k)));
-    if (!hit) return;
-    const last = parseInt((await kvGet(env, `stkcd:${chatId}`)) || "0", 10);
-    if (Date.now() - last < 120000) return;
-    const pool = await getStickerPool(env, chatId);
-    const cands = pool.filter((x) => hit.emojis.includes(x.e));
-    if (!cands.length) return;
-    if (Math.random() > 0.65) return;
+    let cands = hit ? pool.filter((x) => hit.emojis.includes(x.e)) : [];
+    let chance;
+    if (hit && cands.length) chance = 0.85; // 心情对上, 贴纸又对味: 基本必发
+    else if (hit) {
+      cands = pool;
+      chance = 0.5; // 心情对上但没有同味贴纸: 随机一张陪一下
+    } else {
+      cands = pool;
+      chance = 0.15; // 平时聊天: 偶尔自己冒一张, 图个活人感
+    }
+    if (Math.random() > chance) return;
     const pick = cands[Math.floor(Math.random() * cands.length)];
+    await tg(env, "sendChatAction", {
+      chat_id: chatId,
+      action: "choose_sticker",
+      ...(threadId ? { message_thread_id: threadId } : {}),
+    }).catch(() => {});
     await tg(env, "sendSticker", {
       chat_id: chatId,
       sticker: pick.f,
@@ -3223,6 +3236,7 @@ async function handleUpdate(env, update) {
         const reply = await aiChat(env, chatId, text, undefined, { plain: true, memKey });
         await deliverAiReply(env, chatId, phId, reply, text);
         await reactTo(env, chatId, msg.message_id, "👍");
+        await maybeMoodSticker(env, chatId, threadId, text, reply);
       } catch (e2) {
         console.log("chat err", e2);
         await editOrSend(env, chatId, phId, chatErrorText(e2), e2.status === 402 ? MODEL_KB : undefined, false);
