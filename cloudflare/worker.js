@@ -66,6 +66,7 @@ const HELP = `我是小多, 多情的私人 AI 助手。
 /incognito - 假装失忆模式开关 (不读不存记忆)
 /status - 我的状态卡
 /panel - ✨ 高级面板 (消息里的小程序卡片)
+/model - 🧠 看当前用的哪个模型 / 换模型
 /tool - 🧩 现做一个消息里能点的小工具 (例: /tool AA分账计算器)
 /topics - 🧵 话题工作台 (一键建 工作/日常/灵感/临时 四个独立话题, 记忆互不串)
 /music 歌名 - 搜歌点歌 (点结果里的数字就发歌; 也可直接说 放+歌名)
@@ -298,6 +299,7 @@ button:active{opacity:.55}
 <div id="home">
 <div class="bar"><div class="fill" id="fill"></div></div>
 <div class="barlb"><span id="c2"></span><span id="c3"></span></div>
+<div class="barlb"><span id="cB"></span></div>
 <div class="cny"><div class="lb">距 离 过 年</div><div class="row"><b id="cny">--</b><span>天 · 大年初一</span></div><div class="hms" id="hms"></div></div>
 <div class="grid">
 <button class="main" id="bBrief">☀️ 今日早报</button>
@@ -331,6 +333,7 @@ function draw(read){
  if(S.wx){wx.textContent='🌤 '+S.wx;wx.style.display=''}else{wx.style.display='none'}
  document.getElementById('c2').textContent='🎭 当前人设 · '+(S.pn||'小多本人');
  document.getElementById('c3').textContent='今日额度 '+(S.use||0)+'/'+(S.mx||100);
+ document.getElementById('cB').textContent='🧠 当前模型 · '+(S.br||'');
  var pct=Math.min(100,Math.round((S.use||0)/(S.mx||100)*100));
  document.getElementById('fill').style.width=pct+'%';
  document.getElementById('cny').textContent=(S.cny==null?'--':S.cny);
@@ -363,6 +366,8 @@ if(TelegramWidget.ready)TelegramWidget.ready();
 
 async function panelState(env, chatId, userId, pg) {
   const personaId = (await kvGet(env, `persona:${chatId}`)) || "default";
+  const brainLabel = brainConfig(env, await getBrain(env, chatId)).label;
+  const autoOn = (await kvGet(env, `auto:${chatId}`)) === "1";
   const day = new Date().toISOString().slice(0, 10);
   const use = parseInt((await kvGet(env, `cnt:${day}:u${userId}`)) || "0", 10);
   const bj = new Date(Date.now() + 8 * 3600 * 1000);
@@ -392,6 +397,7 @@ async function panelState(env, chatId, userId, pg) {
   return JSON.stringify({
     pg: pg || "home",
     pn: (PERSONAS[personaId] || PERSONAS.default).label,
+    br: brainLabel + (autoOn ? " · 智能选" : ""),
     cny,
     cnts,
     use,
@@ -1941,7 +1947,7 @@ function keepTyping(env, chatId, action) {
 
 async function ensureBotCommands(env) {
   try {
-    if (await kvGet(env, "sys:cmdset4")) return;
+    if (await kvGet(env, "sys:cmdset5")) return;
     await tg(env, "setMyCommands", {
       commands: [
         { command: "start", description: "🏠 打开菜单" },
@@ -1954,9 +1960,10 @@ async function ensureBotCommands(env) {
         { command: "panel", description: "✨ 高级面板" },
         { command: "tool", description: "🧩 现做一个小工具" },
         { command: "topics", description: "🧵 话题工作台" },
+        { command: "model", description: "🧠 当前模型 / 换模型" },
       ],
     });
-    await kvPut(env, "sys:cmdset4", "1", 604800);
+    await kvPut(env, "sys:cmdset5", "1", 604800);
   } catch (e) {
     console.log("cmdset err", e);
   }
