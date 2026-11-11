@@ -66,6 +66,7 @@ const HELP = `我是小多, 多情的私人 AI 助手。
 /incognito - 假装失忆模式开关 (不读不存记忆)
 /status - 我的状态卡
 /panel - ✨ 高级面板 (消息里的小程序卡片)
+/tool - 🧩 现做一个消息里能点的小工具 (例: /tool AA分账计算器)
 /music 歌名 - 搜歌点歌 (点结果里的数字就发歌; 也可直接说 放+歌名)
 /morning - 今日早报
 /myid - 我的 Telegram 数字 ID
@@ -74,7 +75,7 @@ const HELP = `我是小多, 多情的私人 AI 助手。
 
 const MENU_KB = {
   inline_keyboard: [
-    [{ text: "✨ 高级面板", callback_data: "m:panel" }],
+    [{ text: "✨ 高级面板", callback_data: "m:panel", style: "primary" }],
     [
       { text: "🎨 画图", callback_data: "m:draw" },
       { text: "🆕 新话题", callback_data: "m:new" },
@@ -569,6 +570,46 @@ async function editOrSend(env, chatId, messageId, text, replyMarkup, useMd) {
   }
 }
 
+// ---------- v6.0 富文本交付 / 反应表情 ----------
+async function sendRich(env, chatId, markdown, replyMarkup, quoteOpts) {
+  const body = String(markdown || "").slice(0, 32000);
+  if (!body.trim()) return null;
+  const payload = { chat_id: chatId, rich_message: { markdown: body } };
+  if (replyMarkup) payload.reply_markup = replyMarkup;
+  if (quoteOpts && quoteOpts.message_id) {
+    payload.reply_parameters = { message_id: quoteOpts.message_id };
+    if (quoteOpts.quote) {
+      payload.reply_parameters.quote = quoteOpts.quote;
+      if (quoteOpts.quote_entities) payload.reply_parameters.quote_entities = quoteOpts.quote_entities;
+    }
+  }
+  const res = await tg(env, "sendRichMessage", payload);
+  return res && res.ok ? res.result : null;
+}
+
+async function reactTo(env, chatId, messageId, emoji) {
+  if (!messageId) return;
+  try {
+    await tg(env, "setMessageReaction", {
+      chat_id: chatId,
+      message_id: messageId,
+      reaction: [{ type: "emoji", emoji }],
+    });
+  } catch {}
+}
+
+// 流式聊天的最终交付: 优先富文本气泡, 失败退回普通 Markdown 消息
+async function deliverStreamReply(env, chatId, reply, userText, quoteOpts) {
+  const blocks = extractBlocks(reply);
+  if (blocks.length) await kvPut(env, `lastcode:${chatId}`, JSON.stringify(blocks), 60 * 60);
+  const kb = replyKb(blocks.length > 0);
+  const sent = await sendRich(env, chatId, reply, kb, quoteOpts);
+  if (!sent) await sendText(env, chatId, reply, undefined, kb, true);
+  const wantFile = (userText || "").includes("文件");
+  const huge = blocks.some((b) => b.code.length > 3000);
+  if (blocks.length && (wantFile || huge)) await sendBlocksAsFiles(env, chatId, blocks);
+}
+
 // ---------- KV 小工具 (未绑定 KV 时全部降级) ----------
 async function kvGet(env, key) {
   if (!env.BOT_KV) return null;
@@ -818,6 +859,14 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
     const now = Date.now();
     if (reply && onPartial && now - lastPush >= 800) {
       lastPush = now;
+      if (opts && opts.stopCheck) {
+        let stopNow = false;
+        try { stopNow = await opts.stopCheck(); } catch {}
+        if (stopNow) {
+          try { await reader.cancel(); } catch {}
+          break;
+        }
+      }
       try { await onPartial(reply); } catch {}
     }
   }
@@ -1883,7 +1932,7 @@ function keepTyping(env, chatId, action) {
 
 async function ensureBotCommands(env) {
   try {
-    if (await kvGet(env, "sys:cmdset2")) return;
+    if (await kvGet(env, "sys:cmdset3")) return;
     await tg(env, "setMyCommands", {
       commands: [
         { command: "start", description: "🏠 打开菜单" },
@@ -1894,9 +1943,10 @@ async function ensureBotCommands(env) {
         { command: "remind", description: "⏰ 设个提醒" },
         { command: "status", description: "📊 机器人状态" },
         { command: "panel", description: "✨ 高级面板" },
+        { command: "tool", description: "🧩 现做一个小工具" },
       ],
     });
-    await kvPut(env, "sys:cmdset2", "1", 604800);
+    await kvPut(env, "sys:cmdset3", "1", 604800);
   } catch (e) {
     console.log("cmdset err", e);
   }
@@ -2083,10 +2133,70 @@ async function handleCallback(env, cq) {
   }
 }
 
+// ---------- v6.0 /tool: AI 现场生成消息内小工具 (Widget) ----------
+const TOOLGEN_SYS = [
+  "你是一个 Telegram 消息内小组件(Widget)生成器。根据用户需求, 只输出一段完整的 HTML 代码, 不要任何解释, 不要 markdown 代码围栏。",
+  "硬性规格: 单文件, CSS 和 JS 全部内联; 禁止任何外部资源与网络请求 (不能出现 http 外链, 不能 fetch)。",
+  "体积: Telegram 要求压缩后小于 4KB, 所以代码必须短小精悍, 全文尽量控制在 9000 字符以内, 越短越好。",
+  "环境: QuickJS 沙箱, 可用 localStorage; 背景色用 var(--tg-theme-bg-color, #ffffff), 文字色用 var(--tg-theme-text-color, #1a1814)。",
+  "界面: 中文, 手机竖屏, 按钮和字都要大, 主色深松绿 #1F6B52, 圆角卡片风。",
+  "直接输出 HTML 本身, 第一个字符必须是 < 。",
+].join(NL);
+
+async function doToolGen(env, chatId, userId, wish, replyTo) {
+  if (!(await quotaTake(env, userId))) {
+    await sendText(env, chatId, "今天的 AI 额度用完了, 明天再来。");
+    return;
+  }
+  const stopTyping = keepTyping(env, chatId);
+  const phId = await sendPlaceholder(env, chatId, "🧩 小多正在现做这个小工具…", replyTo);
+  try {
+    const prompt = [TOOLGEN_SYS, "", `用户需求: ${wish}`].join(NL);
+    let html = await aiChat(env, chatId, prompt, `（做小工具: ${wish}）`, {});
+    // 抹掉这次生成在短期记忆里留下的大块 HTML, 免得撑爆后续上下文
+    try {
+      const raw = await kvGet(env, `mem:${chatId}`);
+      if (raw) {
+        const h = JSON.parse(raw);
+        const cut = h.filter((m) => !(typeof m.content === "string" && m.content.includes("小组件(Widget)生成器")));
+        await kvPut(env, `mem:${chatId}`, JSON.stringify(cut), 60 * 60 * 24 * 7);
+      }
+    } catch {}
+    html = String(html || "").trim();
+    const fenceAt = html.indexOf("```");
+    if (fenceAt >= 0) {
+      const endAt = html.lastIndexOf("```");
+      html = html.slice(fenceAt + 3, endAt > fenceAt ? endAt : undefined).replace(/^html/i, "").trim();
+    }
+    const ltAt = html.indexOf("<");
+    if (ltAt > 0) html = html.slice(ltAt);
+    const low = html.toLowerCase();
+    if (!low.includes("<html") && !low.includes("<!doctype")) throw new Error("not html");
+    if (html.length > 30000) throw new Error("tool html too big");
+    const r = await tg(env, "sendWidget", { chat_id: chatId, html, caption: `🧩 ${wish.slice(0, 60)}` });
+    if (r && r.ok) {
+      await editOrSend(env, chatId, phId, "做好了 👇 点开就能用, 用完关掉就行, 不占地方。", undefined, false);
+    } else {
+      await sendDocument(env, chatId, html, "tool.html", `🧩 ${wish.slice(0, 60)}`);
+      await editOrSend(env, chatId, phId, "卡片没塞进去 (可能太大了), 改成文件发你: tool.html, 点开一样能用。", undefined, false);
+    }
+  } catch (e) {
+    console.log("toolgen err", e);
+    await editOrSend(env, chatId, phId, "这个工具没做成, 换个说法再试试 (说得越具体越容易成)。", undefined, false);
+  }
+  stopTyping();
+}
+
 // ---------- 消息处理 ----------
 async function handleUpdate(env, update) {
   const uid0 = update.widget_query?.from?.id || update.callback_query?.from?.id || update.message?.from?.id || update.channel_post?.from?.id;
   if (uid0 != null && (await isAllowed(env, uid0))) await ensureBotCommands(env);
+  if (update.stopped_message_generation) {
+    const smg = update.stopped_message_generation;
+    const cid = (smg.chat && smg.chat.id) || (smg.user && smg.user.id);
+    if (cid != null) await kvPut(env, `stopgen:${cid}`, "1", 120);
+    return;
+  }
   if (update.widget_query) {
     await handleWidgetQuery(env, update.widget_query);
     return;
@@ -2273,7 +2383,32 @@ async function handleUpdate(env, update) {
 
   if (text.startsWith("/start")) {
     await ensureBotCommands(env);
+    const param = text.slice("/start".length).trim().toLowerCase();
+    if (param === "panel") {
+      await sendPanel(env, chatId, userId);
+      return;
+    }
+    if (param === "sum") {
+      await kvPut(env, `awaitsum:${chatId}`, "1", 600);
+      await sendText(env, chatId, "📚 总结模式开好了: 把长文或链接直接发我, 我给你提炼要点。发完自动退出这个模式。");
+      return;
+    }
+    if (param === "tool") {
+      await kvPut(env, `awaittool:${chatId}`, "1", 600);
+      await sendText(env, chatId, "🧩 造工具模式开好了: 说你想要个什么小工具 (比如 AA 分账计算器、掷骰子、倒计时牌), 我现写一个能点的发你。");
+      return;
+    }
     await sendText(env, chatId, "在呢, 喊一声就应 👋 我是小多。直接发消息跟我聊, 或者点下面的按钮 👇", undefined, MENU_KB);
+    return;
+  }
+  if (text.startsWith("/tool")) {
+    const arg = text.slice("/tool".length).trim();
+    if (!arg) {
+      await kvPut(env, `awaittool:${chatId}`, "1", 600);
+      await sendText(env, chatId, "🧩 说你想要个什么小工具, 比如「AA分账计算器」「掷骰子决定吃什么」「番茄钟」, 我现写一个能点的发你。");
+      return;
+    }
+    await doToolGen(env, chatId, userId, arg, msg.message_id);
     return;
   }
   if (text.startsWith("/help")) {
@@ -2625,6 +2760,25 @@ async function handleUpdate(env, update) {
     return;
   }
 
+  // 深链接模式: 等总结材料中 -> 把下一条内容改写成总结任务, 继续走正常流程
+  const awaitSum = await kvGet(env, `awaitsum:${chatId}`);
+  if (awaitSum && !text.startsWith("/")) {
+    if (env.BOT_KV) {
+      try { await env.BOT_KV.delete(`awaitsum:${chatId}`); } catch {}
+    }
+    text = ["请总结下面这段内容: 先用一句话说清核心, 再用要点列出关键信息, 最后给一句结论。", "", text].join(NL);
+  }
+
+  // 造工具模式: 等需求描述中
+  const awaitTool = await kvGet(env, `awaittool:${chatId}`);
+  if (awaitTool && !text.startsWith("/")) {
+    if (env.BOT_KV) {
+      try { await env.BOT_KV.delete(`awaittool:${chatId}`); } catch {}
+    }
+    await doToolGen(env, chatId, userId, text, msg.message_id);
+    return;
+  }
+
   // 音乐按钮的后续: 等歌名中
   const awaitMusic = await kvGet(env, `awaitmusic:${chatId}`);
   if (awaitMusic) {
@@ -2679,16 +2833,50 @@ async function handleUpdate(env, update) {
     return;
   }
 
-  // ----- 普通聊天 (v5.9 流式: 先 Thinking 草稿, 再逐字推送, 最后落正式消息) -----
+  // ----- 普通聊天 (v6.0: 富文本草稿流式 + 可停止 + 富文本气泡落盘) -----
   const draftId = msg.message_id || Date.now() % 1000000000;
+  if (env.BOT_KV) {
+    try { await env.BOT_KV.delete(`stopgen:${chatId}`); } catch {}
+  }
+  await reactTo(env, chatId, msg.message_id, "🤔");
   let streamed = false;
   try {
-    await tg(env, "sendMessageDraft", { chat_id: chatId, draft_id: draftId, text: "" });
-    const reply = await aiChatStream(env, chatId, text, undefined, { plain: true }, async (partial) => {
-      await tg(env, "sendMessageDraft", { chat_id: chatId, draft_id: draftId, text: partial.slice(0, 4000) });
+    await tg(env, "sendRichMessageDraft", {
+      chat_id: chatId,
+      draft_id: draftId,
+      rich_message: { markdown: "💭 思考中…" },
+      can_stop: true,
+      keep_on_stop: true,
     });
+    const reply = await aiChatStream(
+      env,
+      chatId,
+      text,
+      undefined,
+      { plain: true, stopCheck: async () => (await kvGet(env, `stopgen:${chatId}`)) === "1" },
+      async (partial) => {
+        await tg(env, "sendRichMessageDraft", {
+          chat_id: chatId,
+          draft_id: draftId,
+          rich_message: { markdown: partial.slice(0, 30000) },
+          can_stop: true,
+          keep_on_stop: true,
+        });
+      }
+    );
     streamed = true;
-    await deliverAiReply(env, chatId, null, reply, text);
+    const wasStopped = (await kvGet(env, `stopgen:${chatId}`)) === "1";
+    const finalText = wasStopped ? reply + NL + NL + "⏹️ (你按了停止, 先到这)" : reply;
+    const quoteOpts =
+      msg.quote && msg.reply_to_message
+        ? {
+            message_id: msg.reply_to_message.message_id,
+            quote: String(msg.quote.text || "").slice(0, 1024),
+            quote_entities: msg.quote.entities,
+          }
+        : null;
+    await deliverStreamReply(env, chatId, finalText, text, quoteOpts);
+    await reactTo(env, chatId, msg.message_id, wasStopped ? "👌" : "👍");
   } catch (e) {
     console.log("stream chat err, fallback", e);
     if (!streamed) {
@@ -2696,6 +2884,7 @@ async function handleUpdate(env, update) {
       try {
         const reply = await aiChat(env, chatId, text, undefined, { plain: true });
         await deliverAiReply(env, chatId, phId, reply, text);
+        await reactTo(env, chatId, msg.message_id, "👍");
       } catch (e2) {
         console.log("chat err", e2);
         await editOrSend(env, chatId, phId, chatErrorText(e2), e2.status === 402 ? MODEL_KB : undefined, false);
