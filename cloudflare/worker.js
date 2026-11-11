@@ -266,25 +266,34 @@ export default {
 // ---------- v5.8 高级面板 (Bot API 10.4 Widget) ----------
 const PANEL_HTML = `<style>
 body{margin:0;font-family:-apple-system,sans-serif}
-.hd{display:flex;align-items:center;gap:9px;padding:2px 0 6px}
-.logo{width:36px;height:36px;border-radius:11px;background:#1F6B52;color:#fff;display:flex;align-items:center;justify-content:center;font-size:19px}
-.tt{font-size:16px;font-weight:700}
-.st{font-size:12px;color:var(--tg-theme-hint-color)}
-.chips{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 10px}
-.chip{background:var(--tg-theme-secondary-bg-color);border-radius:999px;padding:4px 10px;font-size:12px}
-.cny{background:linear-gradient(135deg,#b91c1c,#dc2626);color:#fff;border-radius:14px;padding:12px;text-align:center;margin-bottom:10px;font-size:15px}
-.cny b{font-size:30px}
+.hd{background:linear-gradient(125deg,#0f3d2e,#1F6B52 55%,#37916f);border-radius:18px;padding:15px;color:#fff;position:relative;overflow:hidden}
+.hd:after{content:'';position:absolute;right:-30px;top:-30px;width:110px;height:110px;border-radius:50%;background:rgba(255,255,255,.09)}
+.logo{width:42px;height:42px;border-radius:13px;background:rgba(255,255,255,.16);display:flex;align-items:center;justify-content:center;font-size:21px;float:left;margin-right:11px}
+.tt{font-size:17px;font-weight:700;letter-spacing:.5px;line-height:42px}
+.sub{display:flex;gap:8px;clear:both;padding-top:11px;font-size:12px}
+.sub span{background:rgba(255,255,255,.14);border-radius:999px;padding:4px 10px}
+.bar{height:6px;border-radius:99px;background:var(--tg-theme-secondary-bg-color);margin:11px 1px 5px;overflow:hidden}
+.fill{height:100%;border-radius:99px;background:linear-gradient(90deg,#1F6B52,#34a853)}
+.barlb{display:flex;justify-content:space-between;font-size:11px;color:var(--tg-theme-hint-color);margin:0 1px 10px}
+.cny{background:linear-gradient(125deg,#6d0f0f,#991b1b 50%,#c02626);border-radius:18px;padding:14px;color:#fff;margin-bottom:10px;position:relative;overflow:hidden}
+.cny:after{content:'🧧';position:absolute;right:8px;top:2px;font-size:52px;opacity:.16}
+.cny .lb{font-size:12px;letter-spacing:3px;opacity:.85}
+.cny .row{display:flex;align-items:baseline;gap:6px;margin-top:3px}
+.cny b{font-size:38px;color:#fcd34d;line-height:1}
+.cny .hms{font-size:13px;opacity:.92;margin-top:5px;letter-spacing:1px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-button{border:0;border-radius:12px;padding:12px 6px;font-size:15px;background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-text-color)}
+button{border:0;border-radius:15px;padding:13px 6px;font-size:15px;font-weight:600;background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-text-color)}
 button:active{opacity:.55}
-.main{background:#1F6B52;color:#fff}
+.main{background:linear-gradient(125deg,#14532d,#1F6B52);color:#fff}
 .wide{width:100%;margin-top:8px}
 .msg{text-align:center;font-size:13px;color:var(--tg-theme-hint-color);min-height:18px;padding-top:8px}
 </style>
-<div class="hd"><div class="logo">✨</div><div><div class="tt">小多 · 高级面板</div><div class="st" id="dt"></div></div></div>
+<div class="hd"><div class="logo">✨</div><div class="tt">小多 · 高级面板</div>
+<div class="sub"><span id="dt"></span><span id="wx"></span></div></div>
 <div id="home">
-<div class="chips"><span class="chip">🟢 在线</span><span class="chip" id="c2"></span><span class="chip" id="c3"></span></div>
-<div class="cny">🧧 距离过年还有 <b id="cny">--</b> 天</div>
+<div class="bar"><div class="fill" id="fill"></div></div>
+<div class="barlb"><span id="c2"></span><span id="c3"></span></div>
+<div class="cny"><div class="lb">距 离 过 年</div><div class="row"><b id="cny">--</b><span>天 · 大年初一</span></div><div class="hms" id="hms"></div></div>
 <div class="grid">
 <button class="main" id="bBrief">☀️ 今日早报</button>
 <button id="bMusic">🎵 点歌</button>
@@ -301,19 +310,33 @@ button:active{opacity:.55}
 var S={};
 var PS=[['default','😎 小多本人'],['coder','👨‍💻 代码助手'],['story','📖 故事编剧'],['translator','🌐 翻译官'],['roast','😏 毒舌损友']];
 function parse(s){try{return JSON.parse(s||'{}')}catch(e){return{}}}
+function pad(n){return (n<10?'0':'')+n}
+function tick(){
+ if(!S.cnts)return;
+ var diff=Math.floor(S.cnts-Date.now()/1000);
+ if(diff<0)diff=0;
+ var d=Math.floor(diff/86400),h=Math.floor(diff%86400/3600),m=Math.floor(diff%3600/60),s=diff%60;
+ document.getElementById('cny').textContent=d;
+ document.getElementById('hms').textContent='还剩 '+h+' 小时 '+m+' 分 '+pad(s)+' 秒';
+}
 function draw(read){
  if(read)S=parse(TelegramWidget.chatData);
- document.getElementById('dt').textContent=S.dt||'';
- document.getElementById('c2').textContent='🎭 '+(S.pn||'小多本人');
- document.getElementById('c3').textContent='📊 今日 '+(S.use||0)+'/'+(S.mx||100);
+ document.getElementById('dt').textContent='🗓 '+(S.dt||'');
+ var wx=document.getElementById('wx');
+ if(S.wx){wx.textContent='🌤 '+S.wx;wx.style.display=''}else{wx.style.display='none'}
+ document.getElementById('c2').textContent='🎭 当前人设 · '+(S.pn||'小多本人');
+ document.getElementById('c3').textContent='今日额度 '+(S.use||0)+'/'+(S.mx||100);
+ var pct=Math.min(100,Math.round((S.use||0)/(S.mx||100)*100));
+ document.getElementById('fill').style.width=pct+'%';
  document.getElementById('cny').textContent=(S.cny==null?'--':S.cny);
+ tick();
  var per=(S.pg==='persona');
  document.getElementById('home').style.display=per?'none':'block';
  document.getElementById('persona').style.display=per?'block':'none';
  if(per){
-  var h='';
-  for(var i=0;i<PS.length;i++)h+='<button data-ps="'+PS[i][0]+'">'+PS[i][1]+'</button>';
-  document.getElementById('plist').innerHTML=h;
+  var htm='';
+  for(var i=0;i<PS.length;i++)htm+='<button data-ps="'+PS[i][0]+'">'+PS[i][1]+'</button>';
+  document.getElementById('plist').innerHTML=htm;
   var bs=document.querySelectorAll('[data-ps]');
   for(var j=0;j<bs.length;j++)bs[j].onclick=function(){say('换好啦 🎭');req('ps:'+this.getAttribute('data-ps'))};
  }
@@ -328,6 +351,7 @@ document.getElementById('bNew').onclick=function(){say('记忆清空啦, 重新�
 document.getElementById('bBack').onclick=function(){req('pg:home')};
 if(TelegramWidget.onEvent)TelegramWidget.onEvent('chatDataChanged',function(){draw(true)});
 draw(true);
+setInterval(tick,1000);
 TelegramWidget.request('refresh').then(function(a){apply(a)},function(e){});
 if(TelegramWidget.ready)TelegramWidget.ready();
 </script>`;
@@ -346,13 +370,29 @@ async function panelState(env, chatId, userId, pg) {
     day: "numeric",
     weekday: "long",
   });
+  let wx = (await kvGet(env, "wx:cache")) || "";
+  if (!wx) {
+    try {
+      const wr = await fetch(
+        "https://api.open-meteo.com/v1/forecast?latitude=26.08&longitude=119.28&daily=temperature_2m_max,temperature_2m_min,weather_code&timezone=Asia%2FShanghai&forecast_days=1"
+      );
+      if (wr.ok) {
+        const wd = await wr.json();
+        wx = `福州 ${weatherLabel(wd.daily.weather_code[0])} ${Math.round(wd.daily.temperature_2m_min[0])}~${Math.round(wd.daily.temperature_2m_max[0])}°C`;
+        await kvPut(env, "wx:cache", wx, 1800);
+      }
+    } catch {}
+  }
+  const cnts = Math.floor((cny >= 0 ? Date.UTC(2027, 1, 6) : Date.UTC(2028, 0, 26)) / 1000) - 8 * 3600;
   return JSON.stringify({
     pg: pg || "home",
     pn: (PERSONAS[personaId] || PERSONAS.default).label,
     cny,
+    cnts,
     use,
     mx: PER_USER_DAILY,
     dt,
+    wx,
   });
 }
 
@@ -701,6 +741,100 @@ async function aiChat(env, chatId, userText, historyText, opts = {}) {
       JSON.stringify({ text: historyText || userText, brain: cfg.id }),
       60 * 60 * 24
     );
+  }
+  if (fellBack) reply += `${NL}${NL}(先用 ${cfg.label} 回你, 你选的那个大脑还没接好)`;
+  return reply;
+}
+
+
+// ---------- v5.9 流式聊天: SSE 逐字读, onPartial 回调推草稿 ----------
+async function aiChatStream(env, chatId, userText, historyText, opts, onPartial) {
+  const ghost = (await kvGet(env, `ghost:${chatId}`)) === "1";
+  let brain = (opts && opts.brain) || null;
+  if (!brain) {
+    const auto = (await kvGet(env, `auto:${chatId}`)) === "1";
+    if (auto) brain = pickAutoBrain(env, userText);
+  }
+  if (!brain) brain = await getBrain(env, chatId);
+  let cfg = brainConfig(env, brain);
+  let fellBack = false;
+  if (!cfg.key) {
+    const order = ["deepseek", "gptoss", "gptoss20", "deepseek-pro"];
+    const altId = order.find((id) => id !== brain && brainConfig(env, id).key);
+    if (altId) {
+      brain = altId;
+      cfg = brainConfig(env, altId);
+      fellBack = true;
+    } else {
+      throw new Error("no ai key configured");
+    }
+  }
+  let history = [];
+  if (!ghost) {
+    const raw = await kvGet(env, `mem:${chatId}`);
+    if (raw) {
+      try { history = JSON.parse(raw); } catch { history = []; }
+    }
+  }
+  const messages = [
+    { role: "system", content: await buildSystem(env, chatId, cfg.label) },
+    ...history,
+    { role: "user", content: userText },
+  ];
+  const t0 = Date.now();
+  const r = await fetch(`${cfg.base}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.key}` },
+    body: JSON.stringify({ model: cfg.model, messages, stream: true }),
+  });
+  if (!r.ok || !r.body) {
+    const err = new Error(`AI HTTP ${r.status}`);
+    err.status = r.status;
+    err.brain = cfg.id;
+    throw err;
+  }
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let reply = "";
+  let lastPush = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split(NL);
+    buf = lines.pop() || "";
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t.startsWith("data:")) continue;
+      const payload = t.slice(5).trim();
+      if (payload === "[DONE]") continue;
+      try {
+        const j = JSON.parse(payload);
+        const piece = j.choices?.[0]?.delta?.content || "";
+        if (piece) reply += piece;
+      } catch {}
+    }
+    const now = Date.now();
+    if (reply && onPartial && now - lastPush >= 800) {
+      lastPush = now;
+      try { await onPartial(reply); } catch {}
+    }
+  }
+  reply = reply.trim();
+  if (!reply) throw new Error("empty stream reply");
+  const ms = Date.now() - t0;
+  await kvPut(env, `last:${chatId}`, JSON.stringify({ brain: cfg.id, ms, at: Date.now() }), 60 * 60 * 24 * 7);
+  if (!ghost) {
+    history.push(
+      { role: "user", content: historyText || userText },
+      { role: "assistant", content: reply }
+    );
+    while (history.length > MEM_ROUNDS * 2) history.shift();
+    await kvPut(env, `mem:${chatId}`, JSON.stringify(history), 60 * 60 * 24 * 7);
+  }
+  if (opts && opts.plain) {
+    await kvPut(env, `lastq:${chatId}`, JSON.stringify({ text: historyText || userText, brain: cfg.id }), 60 * 60 * 24);
   }
   if (fellBack) reply += `${NL}${NL}(先用 ${cfg.label} 回你, 你选的那个大脑还没接好)`;
   return reply;
@@ -2545,14 +2679,28 @@ async function handleUpdate(env, update) {
     return;
   }
 
-  // ----- 普通聊天 -----
-  const phId = await sendPlaceholder(env, chatId, "💭 小多正在思考…", msg.message_id);
+  // ----- 普通聊天 (v5.9 流式: 先 Thinking 草稿, 再逐字推送, 最后落正式消息) -----
+  const draftId = msg.message_id || Date.now() % 1000000000;
+  let streamed = false;
   try {
-    const reply = await aiChat(env, chatId, text, undefined, { plain: true });
-    await deliverAiReply(env, chatId, phId, reply, text);
+    await tg(env, "sendMessageDraft", { chat_id: chatId, draft_id: draftId, text: "" });
+    const reply = await aiChatStream(env, chatId, text, undefined, { plain: true }, async (partial) => {
+      await tg(env, "sendMessageDraft", { chat_id: chatId, draft_id: draftId, text: partial.slice(0, 4000) });
+    });
+    streamed = true;
+    await deliverAiReply(env, chatId, null, reply, text);
   } catch (e) {
-    console.log("chat err", e);
-    await editOrSend(env, chatId, phId, chatErrorText(e), e.status === 402 ? MODEL_KB : undefined, false);
+    console.log("stream chat err, fallback", e);
+    if (!streamed) {
+      const phId = await sendPlaceholder(env, chatId, "💭 小多正在思考…", msg.message_id);
+      try {
+        const reply = await aiChat(env, chatId, text, undefined, { plain: true });
+        await deliverAiReply(env, chatId, phId, reply, text);
+      } catch (e2) {
+        console.log("chat err", e2);
+        await editOrSend(env, chatId, phId, chatErrorText(e2), e2.status === 402 ? MODEL_KB : undefined, false);
+      }
+    }
   }
   stopTyping();
 }
