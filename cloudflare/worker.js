@@ -1945,11 +1945,15 @@ async function fetchSongBuf(url, expectSec, diag) {
   return buf;
 }
 
-function keepTyping(env, chatId, action) {
+function keepTyping(env, chatId, action, threadId) {
   let stopped = false;
   const tick = () => {
     if (stopped) return;
-    tg(env, "sendChatAction", { chat_id: chatId, action: action || "typing" }).catch(() => {});
+    tg(env, "sendChatAction", {
+      chat_id: chatId,
+      action: action || "typing",
+      ...(threadId ? { message_thread_id: threadId } : {}),
+    }).catch(() => {});
   };
   tick();
   const iv = setInterval(tick, 4000);
@@ -3014,7 +3018,7 @@ async function handleUpdate(env, update) {
     await sendText(env, chatId, "今天的 AI 额度用完了, 明天再来。");
     return;
   }
-  const stopTyping = keepTyping(env, chatId);
+  const stopTyping = keepTyping(env, chatId, undefined, threadId);
 
   // ----- 读链接 -----
   const pageUrl = extractFirstUrl(text);
