@@ -26,7 +26,7 @@
 //   ALLOWED_IDS      可选, 逗号分隔的 Telegram 数字 ID; 空 = 第一个 /start 的人临时认主
 //   DEEPSEEK_MODEL   可选, 覆盖 DeepSeek 日常模型名, 默认 deepseek-chat
 //   GROQ_MODEL       可选, 覆盖 GPT-OSS 120B 模型名 (也兼容旧变量名 AI_MODEL)
-//   VISION_MODEL     可选, 默认 meta-llama/llama-4-scout-17b-16e-instruct
+//   VISION_MODEL     可选, 默认 qwen/qwen3.8-27b (Scout/Maverick 已被 Groq 于 2026 年关停)
 //   WEBHOOK_SECRET   可选, 默认 dq686hook (webhook 路径)
 // 部署后打开 https://<你的worker地址>/<WEBHOOK_SECRET>/setwebhook 注册 webhook
 
@@ -927,30 +927,49 @@ function bufToB64(buf) {
 }
 
 async function aiVision(env, imageBuf, prompt) {
-  const model = env.VISION_MODEL || "meta-llama/llama-4-scout-17b-16e-instruct";
+  // Groq 已关停 Llama 4 Scout (2026-07-17) / Maverick (2026-03-09); 现役多模态是 Qwen 3.8 27B
+  const models = [];
+  if (env.VISION_MODEL) models.push(env.VISION_MODEL);
+  for (const m of ["qwen/qwen3.8-27b", "qwen/qwen3.6-27b", "meta-llama/llama-4-scout-17b-16e-instruct"]) {
+    if (!models.includes(m)) models.push(m);
+  }
   const b64 = bufToB64(imageBuf);
-  const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${env.GROQ_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: prompt },
-            { type: "image_url", image_url: { url: `data:image/jpeg;base64,${b64}` } },
-          ],
+  let lastErr = null;
+  for (const model of models) {
+    try {
+      const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${env.GROQ_API_KEY}`,
         },
-      ],
-    }),
-  });
-  if (!r.ok) throw new Error(`vision HTTP ${r.status}`);
-  const data = await r.json();
-  return (data.choices?.[0]?.message?.content || "").trim();
+        body: JSON.stringify({
+          model,
+          max_tokens: 1024,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: prompt },
+                { type: "image_url", image_url: { url: `data:image/jpeg;base64,${b64}` } },
+              ],
+            },
+          ],
+        }),
+      });
+      if (!r.ok) {
+        lastErr = new Error(`vision HTTP ${r.status} @${model}`);
+        continue;
+      }
+      const data = await r.json();
+      const out = (data.choices?.[0]?.message?.content || "").trim();
+      if (out) return out;
+      lastErr = new Error(`vision empty @${model}`);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("vision failed");
 }
 
 // ---------- 语音转文字 (Groq Whisper) ----------
@@ -2512,9 +2531,16 @@ async function handleUpdate(env, update) {
       return;
     }
     await tg(env, "sendChatAction", { chat_id: chatId, action: "typing" });
-    const phId = await sendPlaceholder(env, chatId, "👀 小多正在看图…", msg.message_id);
+    const phId = await sendPlaceholder(env, chatId, "👀 小多正在看图…", msg.message_id, threadId);
     try {
-      const fileId = photos[photos.length - 1].file_id;
+      let pick = photos[photos.length - 1];
+      for (let i = photos.length - 1; i >= 0; i--) {
+        if (!photos[i].file_size || photos[i].file_size <= 1500000) {
+          pick = photos[i];
+          break;
+        }
+      }
+      const fileId = pick.file_id;
       const info = await tg(env, "getFile", { file_id: fileId });
       const filePath = info?.result?.file_path;
       const fr = await fetch(`https://api.telegram.org/file/bot${env.BOT_TOKEN}/${filePath}`);
@@ -2524,7 +2550,7 @@ async function handleUpdate(env, update) {
       await editOrSend(env, chatId, phId, answer, undefined, true);
     } catch (e) {
       console.log("vision err", e);
-      await editOrSend(env, chatId, phId, "看图时出了点问题, 稍后再发一次试试。", undefined, false);
+      await editOrSend(env, chatId, phId, `看图时出了点问题 (${String(e.message || e).slice(0, 60)}), 稍后再发一次试试。`, undefined, false);
     }
     return;
   }
