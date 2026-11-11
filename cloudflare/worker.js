@@ -6,6 +6,8 @@
 //   四模型自检 (/check)、双模型擂台 (/arena)、换模型重答 (/retry)、定时提醒 (/remind)
 //   网页盯梢 (/watch, 并入每日早报)、代码工坊 (/audit /explain /refactor /tr)
 //   导出 (/export)、假装失忆 (/incognito)、状态卡 (/status)
+// v5.7 新增: 每日早报加「过年倒计时」行 (春节 2027-02-06 大年初一, 提前每天报天数,
+//   当天报过年好, 过了自动不再出现)
 // 看图: Groq 视觉模型 (GROQ_API_KEY); 作图: Pollinations 免费接口
 // 代码交付: 回复带按钮, 一点把代码块存成文件发送; 说"文件"或代码太长时自动发文件
 // 读链接: 发网址自动抓正文总结; 读文件: txt/md/代码/日志/Word(docx) 发来就能读
@@ -916,6 +918,19 @@ function weatherLabel(code) {
   return map[code] || "多云";
 }
 
+// 过年倒计时 (春节 = 2027-02-06 大年初一); 返回一行文本, 过了春节返回 null
+function cnyCountdownLine() {
+  const DAY = 86400000;
+  const bj = new Date(Date.now() + 8 * 3600 * 1000); // Worker 是 UTC, +8 = 北京时间
+  const today = Date.UTC(bj.getUTCFullYear(), bj.getUTCMonth(), bj.getUTCDate());
+  const cny = Date.UTC(2027, 1, 6);
+  const days = Math.round((cny - today) / DAY);
+  if (days > 1) return `🧧 距离过年（2月6日 · 大年初一）还有 ${days} 天。`;
+  if (days === 1) return "🧧 明天就过年啦, 今天是除夕, 团圆饭吃起来!";
+  if (days === 0) return "🧧 今天就是大年初一! 过年好, 新年快乐, 红包拿来!";
+  return null;
+}
+
 async function composeBriefing() {
   const dateStr = new Date().toLocaleDateString("zh-CN", {
     timeZone: "Asia/Shanghai",
@@ -949,6 +964,8 @@ async function composeBriefing() {
   } catch (e) {
     console.log("weather err", e);
   }
+  const cnyLine = cnyCountdownLine();
+  if (cnyLine) lines.push(cnyLine);
   lines.push("", "—— 小多 · 每日早报");
   return lines.join(NL);
 }
