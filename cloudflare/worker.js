@@ -65,6 +65,7 @@ const HELP = `我是小多, 多情的私人 AI 助手。
 /export - 导出我的记忆和聊天记录
 /incognito - 假装失忆模式开关 (不读不存记忆)
 /status - 我的状态卡
+/panel - ✨ 高级面板 (消息里的小程序卡片)
 /music 歌名 - 搜歌点歌 (点结果里的数字就发歌; 也可直接说 放+歌名)
 /morning - 今日早报
 /myid - 我的 Telegram 数字 ID
@@ -73,6 +74,7 @@ const HELP = `我是小多, 多情的私人 AI 助手。
 
 const MENU_KB = {
   inline_keyboard: [
+    [{ text: "✨ 高级面板", callback_data: "m:panel" }],
     [
       { text: "🎨 画图", callback_data: "m:draw" },
       { text: "🆕 新话题", callback_data: "m:new" },
@@ -259,6 +261,91 @@ export default {
     );
   },
 };
+
+
+// ---------- v5.8 高级面板 (Bot API 10.4 Widget) ----------
+const PANEL_HTML = `' + WIDGET_HTML + '`;
+
+async function panelState(env, chatId, userId, pg) {
+  const personaId = (await kvGet(env, `persona:${chatId}`)) || "default";
+  const day = new Date().toISOString().slice(0, 10);
+  const use = parseInt((await kvGet(env, `cnt:${day}:u${userId}`)) || "0", 10);
+  const bj = new Date(Date.now() + 8 * 3600 * 1000);
+  const today = Date.UTC(bj.getUTCFullYear(), bj.getUTCMonth(), bj.getUTCDate());
+  let cny = Math.round((Date.UTC(2027, 1, 6) - today) / 86400000);
+  if (cny < 0) cny = Math.round((Date.UTC(2028, 0, 26) - today) / 86400000);
+  const dt = new Date().toLocaleDateString("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    month: "long",
+    day: "numeric",
+    weekday: "long",
+  });
+  return JSON.stringify({
+    pg: pg || "home",
+    pn: (PERSONAS[personaId] || PERSONAS.default).label,
+    cny,
+    use,
+    mx: PER_USER_DAILY,
+    dt,
+  });
+}
+
+async function sendPanel(env, chatId, userId) {
+  const st = await panelState(env, chatId, userId, "home");
+  const r = await tg(env, "sendWidget", {
+    chat_id: chatId,
+    html: PANEL_HTML,
+    chat_data: st,
+    allow_queries: true,
+    caption: "✨ 小多高级面板 · 卡片里的按钮都能点",
+  });
+  if (!r || !r.ok) {
+    console.log("sendWidget failed", r && r.description);
+    await sendText(env, chatId, "高级面板没打开 (TG 版本可能太旧), 先用经典菜单 👇", undefined, MENU_KB);
+  }
+}
+
+async function handleWidgetQuery(env, wq) {
+  const userId = wq.from?.id;
+  const chatId = wq.chat?.id;
+  const data = wq.data || "";
+  const answer = (d) =>
+    tg(env, "answerWidgetQuery", { widget_query_id: wq.id, ...(d ? { data: d } : {}) });
+  if (userId == null || chatId == null || !(await isAllowed(env, userId))) {
+    await answer();
+    return;
+  }
+  try {
+    if (data === "refresh") {
+      await answer(await panelState(env, chatId, userId, "home"));
+    } else if (data === "pg:persona" || data === "pg:home") {
+      const st = await panelState(env, chatId, userId, data === "pg:persona" ? "persona" : "home");
+      await tg(env, "editMessageWidgetData", { chat_id: chatId, message_id: wq.message_id, chat_data: st });
+      await answer(st);
+    } else if (data.startsWith("ps:")) {
+      const pid = data.slice(3);
+      if (PERSONAS[pid]) await kvPut(env, `persona:${chatId}`, pid);
+      const st = await panelState(env, chatId, userId, "home");
+      await tg(env, "editMessageWidgetData", { chat_id: chatId, message_id: wq.message_id, chat_data: st });
+      await answer(st);
+    } else if (data === "act:brief") {
+      await answer();
+      await sendText(env, chatId, await briefingText(env, chatId));
+    } else if (data === "act:music") {
+      await answer();
+      await kvPut(env, `awaitmusic:${chatId}`, "1", 300);
+      await sendText(env, chatId, "想听啥? 直接发歌名给我, 比如: 入戏太深");
+    } else if (data === "act:new") {
+      await answer();
+      if (env.BOT_KV) await env.BOT_KV.delete(`mem:${chatId}`);
+    } else {
+      await answer();
+    }
+  } catch (e) {
+    console.log("widget query err", e);
+    try { await answer(); } catch {}
+  }
+}
 
 // ---------- Telegram ----------
 async function tg(env, method, payload) {
@@ -1596,7 +1683,7 @@ function keepTyping(env, chatId, action) {
 
 async function ensureBotCommands(env) {
   try {
-    if (await kvGet(env, "sys:cmdset")) return;
+    if (await kvGet(env, "sys:cmdset2")) return;
     await tg(env, "setMyCommands", {
       commands: [
         { command: "start", description: "🏠 打开菜单" },
@@ -1606,9 +1693,10 @@ async function ensureBotCommands(env) {
         { command: "memory", description: "🧠 我的长期记忆" },
         { command: "remind", description: "⏰ 设个提醒" },
         { command: "status", description: "📊 机器人状态" },
+        { command: "panel", description: "✨ 高级面板" },
       ],
     });
-    await kvPut(env, "sys:cmdset", "1", 604800);
+    await kvPut(env, "sys:cmdset2", "1", 604800);
   } catch (e) {
     console.log("cmdset err", e);
   }
@@ -1704,7 +1792,9 @@ async function handleCallback(env, cq) {
   await tg(env, "answerCallbackQuery", { callback_query_id: cq.id });
   if (!(await isAllowed(env, userId))) return;
 
-  if (data === "m:menu") {
+  if (data === "m:panel") {
+    await sendPanel(env, chatId, userId);
+  } else if (data === "m:menu") {
     await sendText(env, chatId, "菜单在这, 点按钮或者直接发消息都行 👇", undefined, MENU_KB);
   } else if (data === "m:help") {
     await sendText(env, chatId, HELP, undefined, MENU_KB);
@@ -1795,8 +1885,12 @@ async function handleCallback(env, cq) {
 
 // ---------- 消息处理 ----------
 async function handleUpdate(env, update) {
-  const uid0 = update.callback_query?.from?.id || update.message?.from?.id || update.channel_post?.from?.id;
+  const uid0 = update.widget_query?.from?.id || update.callback_query?.from?.id || update.message?.from?.id || update.channel_post?.from?.id;
   if (uid0 != null && (await isAllowed(env, uid0))) await ensureBotCommands(env);
+  if (update.widget_query) {
+    await handleWidgetQuery(env, update.widget_query);
+    return;
+  }
   if (update.callback_query) {
     await handleCallback(env, update.callback_query);
     return;
@@ -2101,6 +2195,10 @@ async function handleUpdate(env, update) {
         ? "智能选模型关了, 之后都用你选定的大脑。"
         : "智能选模型开了: 闲聊自动走快档, 代码和难题自动走 DeepSeek 强档。想手动锁死就 /model 选一个再把 /auto 关掉。"
     );
+    return;
+  }
+  if (text.startsWith("/panel")) {
+    await sendPanel(env, chatId, userId);
     return;
   }
   if (text.startsWith("/status")) {
