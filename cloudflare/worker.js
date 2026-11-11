@@ -67,6 +67,7 @@ const HELP = `我是小多, 多情的私人 AI 助手。
 /status - 我的状态卡
 /panel - ✨ 高级面板 (消息里的小程序卡片)
 /tool - 🧩 现做一个消息里能点的小工具 (例: /tool AA分账计算器)
+/topics - 🧵 话题工作台 (一键建 工作/日常/灵感/临时 四个独立话题, 记忆互不串)
 /music 歌名 - 搜歌点歌 (点结果里的数字就发歌; 也可直接说 放+歌名)
 /morning - 今日早报
 /myid - 我的 Telegram 数字 ID
@@ -96,7 +97,10 @@ const MENU_KB = {
       { text: "📝 我的记忆", callback_data: "m:memory" },
       { text: "❓ 帮助", callback_data: "m:help" },
     ],
-    [{ text: "🆔 我的ID", callback_data: "m:myid" }],
+    [
+      { text: "🧵 话题", callback_data: "m:topics" },
+      { text: "🆔 我的ID", callback_data: "m:myid" },
+    ],
   ],
 };
 
@@ -483,10 +487,11 @@ function splitChunks(body) {
   return chunks;
 }
 
-async function sendText(env, chatId, text, replyTo, replyMarkup, useMd) {
+async function sendText(env, chatId, text, replyTo, replyMarkup, useMd, threadId) {
   const chunks = splitChunks(text || "(空回复)");
   for (let i = 0; i < chunks.length; i++) {
     const payload = { chat_id: chatId, text: chunks[i] };
+    if (threadId && i === 0) payload.message_thread_id = threadId;
     if (replyTo && i === 0) payload.reply_to_message_id = replyTo;
     if (replyMarkup && i === chunks.length - 1) payload.reply_markup = replyMarkup;
     if (useMd) {
@@ -536,8 +541,9 @@ async function sendDocument(env, chatId, content, filename, caption) {
 }
 
 // ---------- 思考气泡: 先占位, 再把占位编辑成正式回复 ----------
-async function sendPlaceholder(env, chatId, text, replyTo) {
+async function sendPlaceholder(env, chatId, text, replyTo, threadId) {
   const payload = { chat_id: chatId, text };
+  if (threadId) payload.message_thread_id = threadId;
   if (replyTo) payload.reply_to_message_id = replyTo;
   const res = await tg(env, "sendMessage", payload);
   return res?.result?.message_id || null;
@@ -571,10 +577,11 @@ async function editOrSend(env, chatId, messageId, text, replyMarkup, useMd) {
 }
 
 // ---------- v6.0 富文本交付 / 反应表情 ----------
-async function sendRich(env, chatId, markdown, replyMarkup, quoteOpts) {
+async function sendRich(env, chatId, markdown, replyMarkup, quoteOpts, threadId) {
   const body = String(markdown || "").slice(0, 32000);
   if (!body.trim()) return null;
   const payload = { chat_id: chatId, rich_message: { markdown: body } };
+  if (threadId) payload.message_thread_id = threadId;
   if (replyMarkup) payload.reply_markup = replyMarkup;
   if (quoteOpts && quoteOpts.message_id) {
     payload.reply_parameters = { message_id: quoteOpts.message_id };
@@ -599,12 +606,12 @@ async function reactTo(env, chatId, messageId, emoji) {
 }
 
 // 流式聊天的最终交付: 优先富文本气泡, 失败退回普通 Markdown 消息
-async function deliverStreamReply(env, chatId, reply, userText, quoteOpts) {
+async function deliverStreamReply(env, chatId, reply, userText, quoteOpts, threadId) {
   const blocks = extractBlocks(reply);
   if (blocks.length) await kvPut(env, `lastcode:${chatId}`, JSON.stringify(blocks), 60 * 60);
   const kb = replyKb(blocks.length > 0);
-  const sent = await sendRich(env, chatId, reply, kb, quoteOpts);
-  if (!sent) await sendText(env, chatId, reply, undefined, kb, true);
+  const sent = await sendRich(env, chatId, reply, kb, quoteOpts, threadId);
+  if (!sent) await sendText(env, chatId, reply, undefined, kb, true, threadId);
   const wantFile = (userText || "").includes("文件");
   const huge = blocks.some((b) => b.code.length > 3000);
   if (blocks.length && (wantFile || huge)) await sendBlocksAsFiles(env, chatId, blocks);
@@ -707,6 +714,7 @@ async function getBrain(env, chatId) {
 }
 
 async function aiChat(env, chatId, userText, historyText, opts = {}) {
+  const memKey = (opts && opts.memKey) || `mem:${chatId}`;
   const ghost = (await kvGet(env, `ghost:${chatId}`)) === "1";
   let brain = opts.brain || null;
   if (!brain) {
@@ -729,7 +737,7 @@ async function aiChat(env, chatId, userText, historyText, opts = {}) {
   }
   let history = [];
   if (!ghost) {
-    const raw = await kvGet(env, `mem:${chatId}`);
+    const raw = await kvGet(env, memKey);
     if (raw) {
       try {
         history = JSON.parse(raw);
@@ -773,7 +781,7 @@ async function aiChat(env, chatId, userText, historyText, opts = {}) {
       { role: "assistant", content: reply }
     );
     while (history.length > MEM_ROUNDS * 2) history.shift();
-    await kvPut(env, `mem:${chatId}`, JSON.stringify(history), 60 * 60 * 24 * 7);
+    await kvPut(env, memKey, JSON.stringify(history), 60 * 60 * 24 * 7);
   }
   if (opts.plain) {
     await kvPut(
@@ -790,6 +798,7 @@ async function aiChat(env, chatId, userText, historyText, opts = {}) {
 
 // ---------- v5.9 流式聊天: SSE 逐字读, onPartial 回调推草稿 ----------
 async function aiChatStream(env, chatId, userText, historyText, opts, onPartial) {
+  const memKey = (opts && opts.memKey) || `mem:${chatId}`;
   const ghost = (await kvGet(env, `ghost:${chatId}`)) === "1";
   let brain = (opts && opts.brain) || null;
   if (!brain) {
@@ -812,7 +821,7 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
   }
   let history = [];
   if (!ghost) {
-    const raw = await kvGet(env, `mem:${chatId}`);
+    const raw = await kvGet(env, memKey);
     if (raw) {
       try { history = JSON.parse(raw); } catch { history = []; }
     }
@@ -880,7 +889,7 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
       { role: "assistant", content: reply }
     );
     while (history.length > MEM_ROUNDS * 2) history.shift();
-    await kvPut(env, `mem:${chatId}`, JSON.stringify(history), 60 * 60 * 24 * 7);
+    await kvPut(env, memKey, JSON.stringify(history), 60 * 60 * 24 * 7);
   }
   if (opts && opts.plain) {
     await kvPut(env, `lastq:${chatId}`, JSON.stringify({ text: historyText || userText, brain: cfg.id }), 60 * 60 * 24);
@@ -1932,7 +1941,7 @@ function keepTyping(env, chatId, action) {
 
 async function ensureBotCommands(env) {
   try {
-    if (await kvGet(env, "sys:cmdset3")) return;
+    if (await kvGet(env, "sys:cmdset4")) return;
     await tg(env, "setMyCommands", {
       commands: [
         { command: "start", description: "🏠 打开菜单" },
@@ -1944,9 +1953,10 @@ async function ensureBotCommands(env) {
         { command: "status", description: "📊 机器人状态" },
         { command: "panel", description: "✨ 高级面板" },
         { command: "tool", description: "🧩 现做一个小工具" },
+        { command: "topics", description: "🧵 话题工作台" },
       ],
     });
-    await kvPut(env, "sys:cmdset3", "1", 604800);
+    await kvPut(env, "sys:cmdset4", "1", 604800);
   } catch (e) {
     console.log("cmdset err", e);
   }
@@ -2073,6 +2083,8 @@ async function handleCallback(env, cq) {
     await doMusicPlay(env, chatId, data.slice(4));
   } else if (data === "m:morning") {
     await sendText(env, chatId, await briefingText(env, chatId));
+  } else if (data === "m:topics") {
+    await setupTopics(env, chatId, userId);
   } else if (data === "m:myid") {
     await sendText(env, chatId, `你的 Telegram 数字 ID 是: ${userId}`);
   } else if (data === "f:file") {
@@ -2131,6 +2143,42 @@ async function handleCallback(env, cq) {
     }
     await setBrain(env, chatId, brain);
   }
+}
+
+// ---------- v6.1 话题工作台: 一键建预设话题 ----------
+const PRESET_TOPICS = ["💼 工作", "💬 日常", "💡 灵感", "🧪 临时"];
+
+async function setupTopics(env, chatId, userId) {
+  const me = await tg(env, "getMe", {});
+  if (!me || !me.ok || !me.result || !me.result.has_topics_enabled) {
+    await sendText(env, chatId, "话题模式还没开: 去 @BotFather 小程序 → Bot Settings → Threads Settings, 把 Threaded Mode 打开, 再回来发 /topics。");
+    return;
+  }
+  let saved = {};
+  try {
+    saved = JSON.parse((await kvGet(env, `topics:${chatId}`)) || "{}");
+  } catch {
+    saved = {};
+  }
+  const lines = ["🧵 你的话题工作台:"];
+  let changed = false;
+  for (const name of PRESET_TOPICS) {
+    if (saved[name]) {
+      lines.push(`· ${name} — https://t.me/dq686BOT/${saved[name]}`);
+      continue;
+    }
+    const r = await tg(env, "createForumTopic", { chat_id: chatId, name });
+    if (r && r.ok && r.result && r.result.message_thread_id) {
+      saved[name] = r.result.message_thread_id;
+      changed = true;
+      lines.push(`· ${name} ✅ 刚建好 — https://t.me/dq686BOT/${saved[name]}`);
+    } else {
+      lines.push(`· ${name} ❌ 没建成 (${(r && r.description) || "未知错误"})`);
+    }
+  }
+  if (changed) await kvPut(env, `topics:${chatId}`, JSON.stringify(saved));
+  lines.push("", "点链接或聊天顶部的话题列表就能切换。每个话题的记忆互相独立: 在哪个话题聊, 就只记在哪个话题。主聊天 (全部消息) 的记忆跟话题也是分开的。");
+  await sendText(env, chatId, lines.join(NL), undefined, MENU_KB);
 }
 
 // ---------- v6.0 /tool: AI 现场生成消息内小工具 (Widget) ----------
@@ -2215,6 +2263,8 @@ async function handleUpdate(env, update) {
   let caption = (msg.caption || "").trim();
   const photos = msg.photo || [];
   const doc = msg.document || null;
+  const threadId = msg.is_topic_message && msg.message_thread_id ? msg.message_thread_id : null;
+  const memKey = threadId ? `mem:${chatId}:t${threadId}` : `mem:${chatId}`;
 
   if (text.startsWith("/myid")) {
     await sendText(env, chatId, `你的 Telegram 数字 ID 是: ${userId}`);
@@ -2401,6 +2451,10 @@ async function handleUpdate(env, update) {
     await sendText(env, chatId, "在呢, 喊一声就应 👋 我是小多。直接发消息跟我聊, 或者点下面的按钮 👇", undefined, MENU_KB);
     return;
   }
+  if (text.startsWith("/topics")) {
+    await setupTopics(env, chatId, userId);
+    return;
+  }
   if (text.startsWith("/tool")) {
     const arg = text.slice("/tool".length).trim();
     if (!arg) {
@@ -2416,8 +2470,8 @@ async function handleUpdate(env, update) {
     return;
   }
   if (text.startsWith("/new")) {
-    if (env.BOT_KV) await env.BOT_KV.delete(`mem:${chatId}`);
-    await sendText(env, chatId, "记忆清空了, 咱重新聊。", undefined, MENU_KB);
+    if (env.BOT_KV) await env.BOT_KV.delete(memKey);
+    await sendText(env, chatId, threadId ? "这个话题的记忆清空了, 咱重新聊。" : "记忆清空了, 咱重新聊。", undefined, MENU_KB);
     return;
   }
   if (text.startsWith("/morning")) {
@@ -2803,7 +2857,7 @@ async function handleUpdate(env, update) {
   // ----- 读链接 -----
   const pageUrl = extractFirstUrl(text);
   if (pageUrl) {
-    const phId = await sendPlaceholder(env, chatId, "🔗 小多正在读这篇文章…", msg.message_id);
+    const phId = await sendPlaceholder(env, chatId, "🔗 小多正在读这篇文章…", msg.message_id, threadId);
     try {
       const pageText = await fetchPageText(pageUrl);
       if (!pageText || pageText.length < 30) throw new Error("empty page");
@@ -2816,7 +2870,7 @@ async function handleUpdate(env, update) {
         "---",
         `我的要求: ${ask}`,
       ].join(NL);
-      const reply = await aiChat(env, chatId, prompt, `（分享了链接 ${pageUrl}）`);
+      const reply = await aiChat(env, chatId, prompt, `（分享了链接 ${pageUrl}）`, { memKey });
       await deliverAiReply(env, chatId, phId, reply, text);
     } catch (e) {
       console.log("page err", e);
@@ -2843,6 +2897,7 @@ async function handleUpdate(env, update) {
   try {
     await tg(env, "sendRichMessageDraft", {
       chat_id: chatId,
+      ...(threadId ? { message_thread_id: threadId } : {}),
       draft_id: draftId,
       rich_message: { markdown: "💭 思考中…" },
       can_stop: true,
@@ -2853,10 +2908,11 @@ async function handleUpdate(env, update) {
       chatId,
       text,
       undefined,
-      { plain: true, stopCheck: async () => (await kvGet(env, `stopgen:${chatId}`)) === "1" },
+      { plain: true, memKey, stopCheck: async () => (await kvGet(env, `stopgen:${chatId}`)) === "1" },
       async (partial) => {
         await tg(env, "sendRichMessageDraft", {
           chat_id: chatId,
+          ...(threadId ? { message_thread_id: threadId } : {}),
           draft_id: draftId,
           rich_message: { markdown: partial.slice(0, 30000) },
           can_stop: true,
@@ -2875,14 +2931,14 @@ async function handleUpdate(env, update) {
             quote_entities: msg.quote.entities,
           }
         : null;
-    await deliverStreamReply(env, chatId, finalText, text, quoteOpts);
+    await deliverStreamReply(env, chatId, finalText, text, quoteOpts, threadId);
     await reactTo(env, chatId, msg.message_id, wasStopped ? "👌" : "👍");
   } catch (e) {
     console.log("stream chat err, fallback", e);
     if (!streamed) {
-      const phId = await sendPlaceholder(env, chatId, "💭 小多正在思考…", msg.message_id);
+      const phId = await sendPlaceholder(env, chatId, "💭 小多正在思考…", msg.message_id, threadId);
       try {
-        const reply = await aiChat(env, chatId, text, undefined, { plain: true });
+        const reply = await aiChat(env, chatId, text, undefined, { plain: true, memKey });
         await deliverAiReply(env, chatId, phId, reply, text);
         await reactTo(env, chatId, msg.message_id, "👍");
       } catch (e2) {
