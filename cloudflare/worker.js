@@ -143,6 +143,14 @@ const MODEL_KB = {
       { text: "⚡ GPT-OSS 120B", callback_data: "b:gptoss" },
       { text: "🚀 GPT-OSS 20B", callback_data: "b:gptoss20" },
     ],
+    [
+      { text: "🌩️ Workers AI", callback_data: "b:cfai" },
+      { text: "🌸 Pollinations 兜底", callback_data: "b:polli" },
+    ],
+    [
+      { text: "🔀 OpenRouter", callback_data: "b:openrouter" },
+      { text: "🇫🇷 Mistral", callback_data: "b:mistral" },
+    ],
     [{ text: "↩️ 返回菜单", callback_data: "m:menu" }],
   ],
 };
@@ -204,8 +212,8 @@ const PERSONA_KB = {
   ],
 };
 
-const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20"];
-const VERSION = "v6.7";
+const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20", "cfai", "openrouter", "mistral", "polli"];
+const VERSION = "v6.8";
 
 // ---------- v6.4 设置 (温度/长度/预算) ----------
 function monthKey() {
@@ -412,7 +420,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v6.7)", {
+      return new Response("dq686bot is alive (cloudflare worker v6.8)", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
@@ -547,6 +555,10 @@ input.tin{width:100%;box-sizing:border-box;padding:12px;border-radius:13px;borde
 <button data-wsb="deepseek-pro">🤔 深度思考</button>
 <button data-wsb="gptoss">⚡ GPT-OSS 120B</button>
 <button data-wsb="gptoss20">🚀 GPT-OSS 20B</button>
+<button data-wsb="cfai">🌩️ Workers AI</button>
+<button data-wsb="polli">🌸 Pollinations</button>
+<button data-wsb="openrouter">🔀 OpenRouter</button>
+<button data-wsb="mistral">🇫🇷 Mistral</button>
 </div>
 <button class="wide" id="wsauto">🤖 智能选模型</button>
 <div class="lb2">🌡️ 温度</div>
@@ -1077,6 +1089,37 @@ async function quotaTake(env, userId) {
 }
 
 // ---------- 大脑 (四档可切换) ----------
+
+// ---------- v6.8 大脑池: 统一调用层 (OpenAI 格式 / Workers AI 绑定) ----------
+async function brainFetch(env, cfg, body) {
+  if (cfg.provider === "cfai") {
+    try {
+      if (!env.AI) return { ok: false, status: 0 };
+      const input = { messages: body.messages };
+      if (typeof body.temperature === "number") input.temperature = body.temperature;
+      if (typeof body.max_tokens === "number") input.max_tokens = body.max_tokens;
+      const out = await env.AI.run(cfg.model, input);
+      const text = (out && out.response) || "";
+      if (!text) return { ok: false, status: 0 };
+      const usage = out && out.usage ? { prompt_tokens: out.usage.prompt_tokens || 0, completion_tokens: out.usage.completion_tokens || 0 } : null;
+      return { ok: true, data: { choices: [{ message: { content: text } }], usage } };
+    } catch (e) {
+      return { ok: false, status: 0 };
+    }
+  }
+  try {
+    const r = await fetch(`${cfg.base}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.key}` },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) return { ok: false, status: r.status };
+    return { ok: true, data: await r.json() };
+  } catch (e) {
+    return { ok: false, status: 0 };
+  }
+}
+
 function brainConfig(env, brain) {
   const dsBase = (env.DEEPSEEK_BASE_URL || "https://api.deepseek.com").replace(/\/+$/, "");
   const gqBase = "https://api.groq.com/openai/v1";
@@ -1105,6 +1148,14 @@ function brainConfig(env, brain) {
         model: "openai/gpt-oss-20b",
         key: env.GROQ_API_KEY || "",
       };
+    case "cfai":
+      return { id: "cfai", label: "Workers AI · Llama 3.3 (免费)", provider: "cfai", model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", key: env.AI ? "binding" : "" };
+    case "polli":
+      return { id: "polli", label: "Pollinations 兜底 (免费)", base: "https://text.pollinations.ai/openai", model: "openai", key: "public" };
+    case "openrouter":
+      return { id: "openrouter", label: "OpenRouter 免费池", base: "https://openrouter.ai/api/v1", model: env.OPENROUTER_MODEL || "meta-llama/llama-3.3-70b-instruct:free", key: env.OPENROUTER_KEY || "" };
+    case "mistral":
+      return { id: "mistral", label: "Mistral (免费档)", base: "https://api.mistral.ai/v1", model: env.MISTRAL_MODEL || "mistral-small-latest", key: env.MISTRAL_KEY || "" };
     default:
       return {
         id: "gptoss",
@@ -1121,7 +1172,7 @@ async function getBrain(env, chatId) {
   if (eco && eco === monthKey() && brainConfig(env, "gptoss20").key) return "gptoss20";
   const saved = await kvGet(env, `brain:${chatId}`);
   if (saved && BRAIN_IDS.includes(saved) && (await brainCooled(env, saved))) {
-    const alt = BRAIN_IDS.find((id) => id !== saved && brainConfig(env, id).key);
+    const alt = ["gptoss", "gptoss20", "cfai", "openrouter", "mistral", "deepseek", "deepseek-pro", "polli"].find((id) => id !== saved && brainConfig(env, id).key);
     if (alt) return alt;
   }
   if (BRAIN_IDS.includes(saved) && brainConfig(env, saved).key) return saved;
@@ -1141,7 +1192,7 @@ async function aiChat(env, chatId, userText, historyText, opts = {}) {
   let cfg = brainConfig(env, brain);
   let fellBack = false;
   if (!cfg.key) {
-    const order = ["deepseek", "gptoss", "gptoss20", "deepseek-pro"];
+    const order = ["deepseek", "gptoss", "cfai", "gptoss20", "openrouter", "mistral", "polli", "deepseek-pro"];
     const altId = order.find((id) => id !== brain && brainConfig(env, id).key);
     if (altId) {
       brain = altId;
@@ -1170,39 +1221,34 @@ async function aiChat(env, chatId, userText, historyText, opts = {}) {
     { role: "user", content: userText },
   ];
   const t0 = Date.now();
-  const r = await fetch(`${cfg.base}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${cfg.key}`,
-    },
-    body: JSON.stringify(await chatBody(env, chatId, cfg, messages, false)),
-  });
+  const res = await brainFetch(env, cfg, await chatBody(env, chatId, cfg, messages, false));
   let data = null;
-  if (!r.ok) {
-    if (r.status === 402 || r.status === 429) {
+  if (!res.ok) {
+    if (res.status === 402 || res.status === 429) {
       try { await kvPut(env, `cool:${cfg.id}`, String(Date.now()), 3600); } catch {}
     }
-    const altId = ["gptoss", "deepseek", "gptoss20", "deepseek-pro"].find((id) => id !== cfg.id && brainConfig(env, id).key);
-    if (altId && r.status !== 401 && r.status !== 402) {
-      const alt = brainConfig(env, altId);
-      try {
-        const r2 = await fetch(`${alt.base}/chat/completions`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${alt.key}` },
-          body: JSON.stringify(await chatBody(env, chatId, alt, messages, false)),
-        });
-        if (r2.ok) { data = await r2.json(); cfg = alt; brain = altId; fellBack = true; }
-      } catch {}
+    if (res.status !== 401 && res.status !== 402) {
+      const altOrder = ["gptoss", "cfai", "deepseek", "gptoss20", "openrouter", "mistral", "deepseek-pro", "polli"];
+      for (const altId of altOrder) {
+        if (altId === cfg.id) continue;
+        const alt = brainConfig(env, altId);
+        if (!alt.key) continue;
+        if (await brainCooled(env, altId)) continue;
+        try {
+          const res2 = await brainFetch(env, alt, await chatBody(env, chatId, alt, messages, false));
+          if (res2.ok) { data = res2.data; cfg = alt; brain = altId; fellBack = true; break; }
+          if (res2.status === 402 || res2.status === 429) { try { await kvPut(env, `cool:${altId}`, String(Date.now()), 3600); } catch {} }
+        } catch {}
+      }
     }
     if (!data) {
-      const err = new Error(`AI HTTP ${r.status}`);
-      err.status = r.status;
+      const err = new Error(`AI HTTP ${res.status}`);
+      err.status = res.status;
       err.brain = cfg.id;
       throw err;
     }
   } else {
-    data = await r.json();
+    data = res.data;
   }
   if (data.usage) { try { await recordUsage(env, chatId, cfg.id, data.usage); } catch {} }
   let reply = (data.choices?.[0]?.message?.content || "").trim();
@@ -1247,7 +1293,7 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
   let cfg = brainConfig(env, brain);
   let fellBack = false;
   if (!cfg.key) {
-    const order = ["deepseek", "gptoss", "gptoss20", "deepseek-pro"];
+    const order = ["deepseek", "gptoss", "cfai", "gptoss20", "openrouter", "mistral", "polli", "deepseek-pro"];
     const altId = order.find((id) => id !== brain && brainConfig(env, id).key);
     if (altId) {
       brain = altId;
@@ -1271,6 +1317,11 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
     ...history,
     { role: "user", content: userText },
   ];
+  if (cfg.provider === "cfai" || cfg.id === "polli") {
+    const reply2 = await aiChat(env, chatId, userText, historyText, { ...(opts || {}), brain: cfg.id });
+    if (onPartial) { try { await onPartial(reply2); } catch {} }
+    return reply2;
+  }
   const t0 = Date.now();
   const r = await fetch(`${cfg.base}/chat/completions`, {
     method: "POST",
@@ -1278,7 +1329,7 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
     body: JSON.stringify(await chatBody(env, chatId, cfg, messages, true)),
   });
   if (!r.ok || !r.body) {
-    const altId = ["gptoss", "deepseek", "gptoss20"].find((id) => id !== cfg.id && brainConfig(env, id).key);
+    const altId = ["gptoss", "cfai", "deepseek", "gptoss20", "openrouter", "mistral", "polli"].find((id) => id !== cfg.id && brainConfig(env, id).key);
     if (altId && r.status !== 401 && r.status !== 402) {
       const reply2 = await aiChat(env, chatId, userText, historyText, { ...(opts || {}), brain: altId });
       if (onPartial) { try { await onPartial(reply2); } catch {} }
@@ -1328,7 +1379,7 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
   }
   reply = reply.trim();
   if (!reply) {
-    const altId = ["gptoss", "deepseek", "gptoss20"].find((id) => id !== cfg.id && brainConfig(env, id).key);
+    const altId = ["gptoss", "cfai", "deepseek", "gptoss20", "openrouter", "mistral", "polli"].find((id) => id !== cfg.id && brainConfig(env, id).key);
     if (altId) {
       const reply2 = await aiChat(env, chatId, userText, historyText, { ...(opts || {}), brain: altId });
       if (onPartial) { try { await onPartial(reply2); } catch {} }
@@ -1411,19 +1462,30 @@ async function aiVision(env, imageBuf, prompt) {
 
 // ---------- 语音转文字 (Groq Whisper) ----------
 async function transcribeAudio(env, buf) {
-  const form = new FormData();
-  form.append("file", new Blob([buf], { type: "audio/ogg" }), "voice.ogg");
-  form.append("model", env.WHISPER_MODEL || "whisper-large-v3-turbo");
-  form.append("response_format", "json");
-  form.append("language", "zh");
-  const r = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${env.GROQ_API_KEY}` },
-    body: form,
-  });
-  if (!r.ok) throw new Error(`whisper HTTP ${r.status}`);
-  const data = await r.json();
-  return (data.text || "").trim();
+  if (env.GROQ_API_KEY) {
+    try {
+      const form = new FormData();
+      form.append("file", new Blob([buf], { type: "audio/ogg" }), "voice.ogg");
+      form.append("model", env.WHISPER_MODEL || "whisper-large-v3-turbo");
+      form.append("response_format", "json");
+      form.append("language", "zh");
+      const r = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${env.GROQ_API_KEY}` },
+        body: form,
+      });
+      if (!r.ok) throw new Error(`whisper HTTP ${r.status}`);
+      const data = await r.json();
+      const t = (data.text || "").trim();
+      if (t) return t;
+    } catch (e) { console.log("groq whisper err, try cf", e); }
+  }
+  if (env.AI) {
+    const out = await env.AI.run("@cf/openai/whisper-large-v3-turbo", { audio: Array.from(new Uint8Array(buf)) });
+    const t2 = ((out && out.text) || "").trim();
+    if (t2) return t2;
+  }
+  throw new Error("whisper all failed");
 }
 
 // ---------- Word (.docx) 文本提取: docx 是 zip, 取出 document.xml 去标签 ----------
@@ -1461,14 +1523,27 @@ async function extractDocxText(buf) {
     .trim();
 }
 
-async function drawImage(prompt) {
+async function drawImage(env, prompt) {
   const q = encodeURIComponent(prompt);
-  const r = await fetch(
-    `https://image.pollinations.ai/prompt/${q}?width=1024&height=1024&nologo=true`,
-    { headers: { "User-Agent": "dq686bot/5.0" } }
-  );
-  if (!r.ok) throw new Error(`draw HTTP ${r.status}`);
-  return await r.arrayBuffer();
+  try {
+    const r = await fetch(
+      `https://image.pollinations.ai/prompt/${q}?width=1024&height=1024&nologo=true`,
+      { headers: { "User-Agent": "dq686bot/5.0" } }
+    );
+    if (!r.ok) throw new Error(`draw HTTP ${r.status}`);
+    return await r.arrayBuffer();
+  } catch (e) {
+    if (env && env.AI) {
+      const out = await env.AI.run("@cf/black-forest-labs/flux-1-schnell", { prompt, steps: 6 });
+      if (out && out.image) {
+        const bin = atob(out.image);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return bytes.buffer;
+      }
+    }
+    throw e;
+  }
 }
 
 async function doDraw(env, chatId, userId, prompt, replyTo) {
@@ -1478,7 +1553,7 @@ async function doDraw(env, chatId, userId, prompt, replyTo) {
   }
   await sendText(env, chatId, "收到, 正在画, 大概十几秒...", replyTo);
   try {
-    const buf = await drawImage(prompt);
+    const buf = await drawImage(env, prompt);
     const res = await sendPhoto(env, chatId, buf, `🎨 ${prompt}`);
     if (!res || res.ok === false) {
       const q = encodeURIComponent(prompt);
@@ -1649,7 +1724,7 @@ async function brainCooled(env, id) {
 
 
 // ---------- v6.7: backup/habit/diary/quiet/follow/health/changelog ----------
-const RELEASE_NOTE = "一键备份恢复（每天自动快照留 7 天）、习惯打卡、日记模式（每晚 10 点喊你写两句）、夜间静音、追问建议键盘、每日健康自检";
+const RELEASE_NOTE = "大脑池扩容：新增 Workers AI 和 Pollinations 兜底（都免费），OpenRouter、Mistral 接口备好（注册填 key 就亮）；语音转写和画图都加了备胎，一个挂了自动换下一个";
 function cstDateStr(ts) {
   return new Date(ts + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
@@ -2116,6 +2191,14 @@ function settingsKb(auto, st) {
         { text: "⚡ GPT-OSS 120B", callback_data: "st:brain:gptoss" },
         { text: "🚀 GPT-OSS 20B", callback_data: "st:brain:gptoss20" },
       ],
+      [
+        { text: "🌩️ Workers AI", callback_data: "st:brain:cfai" },
+        { text: "🌸 Pollinations", callback_data: "st:brain:polli" },
+      ],
+      [
+        { text: "🔀 OpenRouter", callback_data: "st:brain:openrouter" },
+        { text: "🇫🇷 Mistral", callback_data: "st:brain:mistral" },
+      ],
       [{ text: `🤖 智能选模型：${auto ? "开" : "关"}`, callback_data: "st:auto" }],
       [
         { text: "🌡️ 温度 0.3", callback_data: "st:temp:0.3" },
@@ -2426,6 +2509,21 @@ function pickAutoBrain(env, text) {
 async function rawComplete(env, brainId, userText) {
   const cfg = brainConfig(env, brainId);
   if (!cfg.key) throw new Error("no key");
+  const res = await brainFetch(env, cfg, {
+    messages: [
+      { role: "system", content: systemPrompt(cfg.label) },
+      { role: "user", content: userText },
+    ],
+  });
+  if (!res.ok) {
+    const e = new Error(`HTTP ${res.status}`);
+    e.status = res.status;
+    throw e;
+  }
+  return (res.data.choices?.[0]?.message?.content || "").trim();
+}
+async function rawCompleteLegacyUnused(env, brainId, userText) {
+  const cfg = brainConfig(env, brainId);
   const r = await fetch(`${cfg.base}/chat/completions`, {
     method: "POST",
     headers: {
@@ -2451,7 +2549,7 @@ async function rawComplete(env, brainId, userText) {
 
 // ---------- v5: 四模型自检 ----------
 async function doCheck(env, chatId, replyTo) {
-  const phId = await sendPlaceholder(env, chatId, "🩺 小多正在自检四个大脑…", replyTo);
+  const phId = await sendPlaceholder(env, chatId, "🩺 小多正在自检各个大脑…", replyTo);
   const lines = ["🩺 大脑自检报告:"];
   for (const id of BRAIN_IDS) {
     const cfg = brainConfig(env, id);
@@ -3582,7 +3680,7 @@ async function handleUpdate(env, update) {
   // ----- 语音: 转成文字后当作普通消息继续走 -----
   if (msg.voice || msg.audio) {
     const media = msg.voice || msg.audio;
-    if (!env.GROQ_API_KEY) {
+    if (!env.GROQ_API_KEY && !env.AI) {
       await sendText(env, chatId, "语音转文字还没接上 key, 找多情/Algo 处理。", msg.message_id);
       return;
     }

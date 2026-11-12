@@ -19,3 +19,6 @@ id = "8d4e32b741cb4a92adc4241ce798ea66"
 
 [triggers]
 crons = ["0 0 * * *", "*/15 * * * *", "0 14 * * *"]
+
+[ai]
+binding = "AI"
