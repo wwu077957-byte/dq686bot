@@ -84,6 +84,9 @@ const HELP = `我是小多, 多情的私人 AI 助手。
 /tr /sum /fix /en 内容 - 翻译/总结/改错字/转英文 (也可引用消息)
 /undo - ↩️ 撤销上一步 (记账/待办/备忘/提醒/模板)
 /pin 内容 - 📌 钉住一条重要信息, 每轮聊天都带着; /unpin 取消
+/backup - 📦 导出全部数据备份 (每天自动快照留 7 天); /restore 恢复
+/habit - 🔥 习惯打卡 (聊天说「打卡 喝水」也行)
+/diary - 📔 日记本 (每晚 10 点我会喊你写两句)
 关键词直答: 问「还有多久过年」「服务器状态」「用量」直接秒回, 不烧额度
 
 点菜单按钮也能办大部分事, 不用记命令。输入框下面还有一排常驻按钮; 直接给我发贴纸, 我会学会, 聊天对上心情时也会回你一张。`;
@@ -202,7 +205,7 @@ const PERSONA_KB = {
 };
 
 const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20"];
-const VERSION = "v6.6.1";
+const VERSION = "v6.7";
 
 // ---------- v6.4 设置 (温度/长度/预算) ----------
 function monthKey() {
@@ -210,7 +213,7 @@ function monthKey() {
   return d.getUTCFullYear() + "-" + ("0" + (d.getUTCMonth() + 1)).slice(-2);
 }
 async function getSettings(env, chatId) {
-  const s = { temp: null, max: null, budget: 0 };
+  const s = { temp: null, max: null, budget: 0, quiet: 0, follow: 1 };
   const raw = await kvGet(env, `set:${chatId}`);
   if (raw) {
     try {
@@ -218,6 +221,8 @@ async function getSettings(env, chatId) {
       if (typeof j.temp === "number") s.temp = j.temp;
       if (typeof j.max === "number" && j.max > 0) s.max = j.max;
       if (typeof j.budget === "number" && j.budget > 0) s.budget = j.budget;
+      if (typeof j.quiet === "number") s.quiet = j.quiet;
+      if (typeof j.follow === "number") s.follow = j.follow;
     } catch {}
   }
   return s;
@@ -407,7 +412,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v6.6.1)", {
+      return new Response("dq686bot is alive (cloudflare worker v6.7)", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
@@ -434,8 +439,18 @@ export default {
       (async () => {
         await fireDueReminders(env).catch((e) => console.log("remind err", e));
         await fireDueTodos(env).catch((e) => console.log("todo err", e));
+        const owner = [...allowedIds(env)][0];
+        if (owner) {
+          await maybeChangelog(env, owner).catch((e) => console.log("changelog err", e));
+          await flushQuiet(env, owner).catch((e) => console.log("quiet flush err", e));
+          if (event.cron === "0 14 * * *") await sendDiaryPrompt(env, owner).catch((e) => console.log("diary err", e));
+        }
         if (!event.cron || event.cron === "0 0 * * *") {
           await sendBriefing(env).catch((e) => console.log("briefing err", e));
+          if (owner) {
+            await dailySnapshot(env, owner).catch((e) => console.log("snapshot err", e));
+            await healthCheck(env, owner).catch((e) => console.log("health err", e));
+          }
         }
       })()
     );
@@ -1009,6 +1024,7 @@ async function deliverStreamReply(env, chatId, reply, userText, quoteOpts, threa
   const wantFile = (userText || "").includes("文件");
   const huge = blocks.some((b) => b.code.length > 3000);
   if (blocks.length && (wantFile || huge)) await sendBlocksAsFiles(env, chatId, blocks);
+  await maybeFollowups(env, chatId, userText, reply, threadId);
 }
 
 // ---------- KV 小工具 (未绑定 KV 时全部降级) ----------
@@ -1553,6 +1569,7 @@ async function deliverAiReply(env, chatId, phId, reply, userText) {
     return;
   }
   await editOrSend(env, chatId, phId, reply, undefined, true);
+  await maybeFollowups(env, chatId, userText, reply, undefined);
 }
 
 function chatErrorText(e) {
@@ -1628,6 +1645,168 @@ function dailyLine() {
 async function brainCooled(env, id) {
   const t = parseInt((await kvGet(env, `cool:${id}`)) || "0", 10);
   return t > 0 && Date.now() - t < 10 * 60 * 1000;
+}
+
+
+// ---------- v6.7: backup/habit/diary/quiet/follow/health/changelog ----------
+const RELEASE_NOTE = "一键备份恢复（每天自动快照留 7 天）、习惯打卡、日记模式（每晚 10 点喊你写两句）、夜间静音、追问建议键盘、每日健康自检";
+function cstDateStr(ts) {
+  return new Date(ts + 8 * 3600 * 1000).toISOString().slice(0, 10);
+}
+function backupKeys(chatId) {
+  return [`prefs:${chatId}`, `persona:${chatId}`, `brain:${chatId}`, `auto:${chatId}`, `set:${chatId}`, `pin:${chatId}`, `bill:${chatId}`, `todo:${chatId}`, `note:${chatId}`, `tpl:${chatId}`, `rem:${chatId}`, `habit:${chatId}`, `diary:${chatId}`, `stk:${chatId}`];
+}
+async function collectBackup(env, chatId) {
+  const data = { app: "dq686bot", ver: VERSION, at: Date.now(), kv: {} };
+  for (const k of backupKeys(chatId)) {
+    const v = await kvGet(env, k);
+    if (v != null) data.kv[k] = v;
+  }
+  return data;
+}
+async function dailySnapshot(env, chatId) {
+  const data = await collectBackup(env, chatId);
+  await kvPut(env, `snap:${cstDateStr(Date.now())}`, JSON.stringify(data), 60 * 60 * 24 * 8);
+  const cst = new Date(Date.now() + 8 * 3600 * 1000);
+  if (cst.getUTCDay() === 0) {
+    await sendDocument(env, chatId, JSON.stringify(data, null, 2), `xiaoduo-weekly-backup-${cstDateStr(Date.now())}.json`, "📦 本周冷备份（机器人每周日自动发一份，存好别删）");
+  }
+}
+async function getHabits(env, chatId) {
+  const raw = await kvGet(env, `habit:${chatId}`);
+  if (!raw) return {};
+  try { const j = JSON.parse(raw); return j && typeof j === "object" ? j : {}; } catch { return {}; }
+}
+async function saveHabits(env, chatId, h) {
+  await kvPut(env, `habit:${chatId}`, JSON.stringify(h), 60 * 60 * 24 * 365);
+}
+function streakOf(days) {
+  let n = 0;
+  let t = Date.now();
+  if (!days[cstDateStr(t)]) t -= 86400000;
+  while (days[cstDateStr(t)]) { n++; t -= 86400000; }
+  return n;
+}
+async function habitText(env, chatId) {
+const h = await getHabits(env, chatId);
+const names = Object.keys(h);
+if (!names.length) return "还没有习惯。用 /habit 喝水，运动，存钱 设置一组，每天聊天里说「打卡 喝水」就行。";
+const today = cstDateStr(Date.now());
+const lines = ["🔥 我的习惯打卡："];
+for (const n of names) lines.push(`${h[n].days[today]? "✅": "⬜"} ${n} · 连续 ${streakOf(h[n].days)} 天 · 累计 ${(Object.keys(h[n].days) || []).length} 天`);
+lines.push("", "打卡直接说「打卡 习惯名」，不带名字我把没打的列成按钮给你点。改习惯：/habit 新名单（逗号分隔）。");
+return lines.join(NL);
+}
+async function doCheckin(env, chatId, name, threadId) {
+const h = await getHabits(env, chatId);
+const today = cstDateStr(Date.now());
+if (name) {
+if (!h[name]) h[name] = { days: {}};
+if (h[name].days[today]) { await sendText(env, chatId, `「${name}」今天已经打过卡啦 ✅ 连续 ${streakOf(h[name].days)} 天`, undefined, undefined, false, threadId); return;}
+h[name].days[today] = 1;
+await saveHabits(env, chatId, h);
+await sendText(env, chatId, `✅ 打卡成功：「${name}」连续 ${streakOf(h[name].days)} 天，累计 ${(Object.keys(h[name].days) || []).length} 天`, undefined, undefined, false, threadId);
+return;
+}
+const names = Object.keys(h);
+if (!names.length) { await sendText(env, chatId, await habitText(env, chatId), undefined, undefined, false, threadId); return;}
+const pending = names.filter((n) =>!h[n].days[today]);
+if (!pending.length) { await sendText(env, chatId, "今天的习惯全打完啦 🎉", undefined, undefined, false, threadId); return;}
+const kb = { inline_keyboard: pending.map((n) => [{ text: `✅ 打卡：${n}`, callback_data: `hb:${encodeURIComponent(n)}`}])};
+await sendText(env, chatId, "今天还没打的（点一下就打上）：", undefined, kb, false, threadId);
+}
+async function getDiary(env, chatId) {
+const raw = await kvGet(env, `diary:${chatId}`);
+if (!raw) return {};
+try { const j = JSON.parse(raw); return j && typeof j === "object"? j: {};} catch { return {};}
+}
+async function sendDiaryPrompt(env, chatId) {
+await kvPut(env, `diaryask:${chatId}`, cstDateStr(Date.now()), 60 * 60 * 3);
+await sendText(env, chatId, "🌙 睡前日记时间：今天过得怎么样？回我几句（3 小时内第一条非命令消息），我帮你记进日记本。发 /diary 看以前的。");
+}
+async function saveDiaryEntry(env, chatId, text, threadId) {
+const d = await getDiary(env, chatId);
+const day = cstDateStr(Date.now());
+if (!d[day]) d[day] = [];
+let tidy = "";
+try { tidy = await quickComplete(env, `把下面这段日记整理成通顺的一段话，保留原意、细节和语气，不要加评价：${NL}${text}`);} catch {}
+d[day].push({ ts: Date.now(), raw: text, tidy: tidy || ""});
+const days = Object.keys(d).sort().slice(-90);
+const keep = {};
+for (const k of days) keep[k] = d[k];
+await kvPut(env, `diary:${chatId}`, JSON.stringify(keep), 60 * 60 * 24 * 365);
+if (env.BOT_KV) await env.BOT_KV.delete(`diaryask:${chatId}`);
+await sendText(env, chatId, `📔 记好啦（${day}）：${NL}${tidy || text}`, undefined, undefined, false, threadId);
+}
+async function diaryText(env, chatId, dayArg) {
+const d = await getDiary(env, chatId);
+const days = Object.keys(d).sort();
+if (!days.length) return "日记本还是空的。每晚 10 点我会喊你写两句，也可以随时发 /diary 内容 直接记一段。";
+if (dayArg && d[dayArg]) return [`📔 ${dayArg}`,...d[dayArg].map((e) => e.tidy || e.raw)].join(NL + NL);
+const show = days.slice(-7);
+const out = ["📔 最近的日记（发 /diary 2026-11-12 看某一天全文）："];
+for (const day of show) out.push(`${NL}`,...d[day].map((e) => e.tidy || e.raw));
+return out.join(NL);
+}
+function inQuietHours() {
+const h = new Date(Date.now() + 8 * 3600 * 1000).getUTCHours();
+return h >= 23 || h < 8;
+}
+async function deliverPush(env, chatId, text) {
+try {
+const st = await getSettings(env, chatId);
+if (st.quiet && inQuietHours()) {
+const q = await kvList(env, `quietq:${chatId}`);
+q.push({ text, ts: Date.now()});
+await kvPut(env, `quietq:${chatId}`, JSON.stringify(q.slice(-20)), 60 * 60 * 24 * 2);
+return;
+}
+} catch {}
+await sendText(env, chatId, text);
+}
+async function flushQuiet(env, chatId) {
+const st = await getSettings(env, chatId);
+if (st.quiet && inQuietHours()) return;
+const q = await kvList(env, `quietq:${chatId}`);
+if (!q.length) return;
+if (env.BOT_KV) await env.BOT_KV.delete(`quietq:${chatId}`);
+await sendText(env, chatId, ["🌙 夜间静音期间攒下的消息：",...q.map((x) => "· " + x.text)].join(NL));
+}
+async function maybeChangelog(env, chatId) {
+const seen = await kvGet(env, "sys:ver");
+if (seen === VERSION) return;
+await kvPut(env, "sys:ver", VERSION);
+await sendText(env, chatId, `🆕 小多升级到 ${VERSION} 啦：${RELEASE_NOTE}。`);
+}
+async function healthCheck(env, chatId) {
+const probs = [];
+try {
+await kvPut(env, "sys:health", String(Date.now()), 120);
+if (!(await kvGet(env, "sys:health"))) probs.push("KV 读写异常");
+} catch { probs.push("KV 读写异常");}
+for (const id of BRAIN_IDS) {
+const cfg = brainConfig(env, id);
+if (!cfg.key) continue;
+try { await rawComplete(env, id, "ping");} catch (e) { if (!e || e.status!== 429) probs.push(`${cfg.label} 不通（${(e && e.status) || "网络"}）`);}
+}
+try {
+const r = await fetch("https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=test&count=1");
+if (!r.ok) probs.push(`点歌主源异常（${r.status}）`);
+} catch { probs.push("点歌主源连不上");}
+if (probs.length) await sendText(env, chatId, "🩺 小多每日自检发现问题：" + NL + probs.map((p) => "· " + p).join(NL));
+}
+async function maybeFollowups(env, chatId, userText, reply, threadId) {
+try {
+if (!reply || reply.length < 300) return;
+const st = await getSettings(env, chatId);
+if (!st.follow) return;
+const sug = await quickComplete(env, `根据这轮对话，给用户三个能接着问的简短问题或请求，每个不超过 14 个字，只输出三行、一行一个、不要编号不要解释：${NL}用户：${String(userText || "").slice(0, 200)}${NL}AI：${reply.slice(0, 400)}`);
+if (!sug) return;
+const lines = sug.split(NL).map((s) => s.trim()).filter((s) => s.length >= 2 && s.length <= 22).slice(0, 3);
+if (lines.length < 2) return;
+const kb = { keyboard: [...lines.map((t) => [{ text: t}]), [{ text: "⌨️ 恢复键盘"}]], resize_keyboard: true};
+await sendText(env, chatId, "💡 接着问（点一下就发出去）：", undefined, kb, false, threadId);
+} catch {}
 }
 
 // ---------- v6.5 生活组: 记账/待办/备忘/模板 + 关键词直答 ----------
@@ -1773,7 +1952,7 @@ async function fireDueTodos(env) {
   if (!due.length) return;
   for (const x of list) if (!x.done && x.due && x.due <= now && !x.nf) x.nf = 1;
   await setTodos(env, chatId, list);
-  for (const x of due) await sendText(env, chatId, `✅ 待办到时间了：${x.text}（发 /todos 标记完成）`);
+  for (const x of due) await deliverPush(env, chatId, `✅ 待办到时间了：${x.text}（发 /todos 标记完成）`);
 }
 
 // --- 备忘 ---
@@ -1926,7 +2105,7 @@ async function tryIntent(env, chatId, userId, text, threadId) {
 }
 
 // ---------- v6.4 设置面板 ----------
-function settingsKb(auto) {
+function settingsKb(auto, st) {
   return {
     inline_keyboard: [
       [
@@ -1955,6 +2134,8 @@ function settingsKb(auto) {
         { text: "💰 50万", callback_data: "st:budget:500000" },
         { text: "💰 100万", callback_data: "st:budget:1000000" },
       ],
+      [{ text: `🌙 夜间静音：${st && st.quiet ? "开" : "关"}`, callback_data: "st:quiet" }],
+      [{ text: `💡 追问建议：${st && st.follow ? "开" : "关"}`, callback_data: "st:follow" }],
       [{ text: "📈 查看用量", callback_data: "st:usage" }],
     ],
   };
@@ -1971,6 +2152,8 @@ async function settingsText(env, chatId) {
     `温度：${st.temp == null ? "默认" : st.temp}（越高越放飞）`,
     `回复长度上限：${st.max ? st.max + " token" : "默认"}`,
     `月 token 预算：${st.budget ? st.budget + `（本月已用 ${m.i + m.o}）` : "未设置"}`,
+    `夜间静音（23点-8点提醒先攒着）：${st.quiet ? "开" : "关"}`,
+    `追问建议键盘：${st.follow ? "开" : "关"}`,
     "",
     "点按钮直接改，立刻生效。也可用命令：/temp 0.7、/max 2000、/usage。",
   ].join(NL);
@@ -1978,7 +2161,8 @@ async function settingsText(env, chatId) {
 async function sendSettings(env, chatId, editId) {
   const auto = (await kvGet(env, `auto:${chatId}`)) === "1";
   const text = await settingsText(env, chatId);
-  const kb = settingsKb(auto);
+  const stForKb = await getSettings(env, chatId);
+  const kb = settingsKb(auto, stForKb);
   if (editId) await editOrSend(env, chatId, editId, text, kb);
   else await sendText(env, chatId, text, undefined, kb);
 }
@@ -2010,6 +2194,14 @@ async function handleSettingsCallback(env, cq, chatId) {
   } else if (kind === "budget") {
     const st = await getSettings(env, chatId);
     st.budget = parseInt(parts[2], 10) || 0;
+    await saveSettings(env, chatId, st);
+  } else if (kind === "quiet") {
+    const st = await getSettings(env, chatId);
+    st.quiet = st.quiet ? 0 : 1;
+    await saveSettings(env, chatId, st);
+  } else if (kind === "follow") {
+    const st = await getSettings(env, chatId);
+    st.follow = st.follow ? 0 : 1;
     await saveSettings(env, chatId, st);
   }
   await sendSettings(env, chatId, cq.message?.message_id);
@@ -2415,7 +2607,7 @@ async function fireDueReminders(env) {
   if (!due.length) return;
   await setReminders(env, chatId, list.filter((r) => r.at > now));
   for (const r of due) {
-    await sendText(env, chatId, `⏰ 提醒到点啦: ${r.text}`);
+    await deliverPush(env, chatId, `⏰ 提醒到点啦: ${r.text}`);
   }
 }
 
@@ -2498,6 +2690,14 @@ async function briefingText(env, chatId) {
     const ds = cstDayStart(Date.now());
     const y = bills.filter((b) => !b.inc && b.ts >= ds - 86400000 && b.ts < ds).reduce((a, b) => a + b.amt, 0);
     if (y > 0) parts.push(`💰 昨天花了 ¥${y.toFixed(2)}`);
+  } catch {}
+  try {
+    const habits = await getHabits(env, chatId);
+    const hNames = Object.keys(habits);
+    if (hNames.length) {
+      const today = cstDateStr(Date.now());
+      parts.push(`🔥 今日打卡：${hNames.map((n) => `${n}${habits[n].days[today] ? " ✓" : ""}（连续${streakOf(habits[n].days)}天）`).join(" · ")}`);
+    }
   } catch {}
   parts.push("", "💡 " + dailyLine());
   const wl = await checkWatchLines(env, chatId);
@@ -2863,7 +3063,7 @@ function keepTyping(env, chatId, action, threadId) {
 
 async function ensureBotCommands(env) {
   try {
-    if (await kvGet(env, "sys:cmdset10")) return;
+    if (await kvGet(env, "sys:cmdset11")) return;
     await tg(env, "setMyCommands", {
       commands: [
         { command: "start", description: "🏠 打开菜单" },
@@ -2894,10 +3094,13 @@ async function ensureBotCommands(env) {
         { command: "notes", description: "📝 我的备忘录" },
         { command: "undo", description: "↩️ 撤销上一步" },
         { command: "pin", description: "📌 钉住一条重要信息" },
+        { command: "backup", description: "📦 导出全部数据备份" },
+        { command: "habit", description: "🔥 习惯打卡" },
+        { command: "diary", description: "📔 我的日记本" },
         { command: "myid", description: "🆔 我的数字 ID" },
       ],
     });
-    await kvPut(env, "sys:cmdset10", "1", 604800);
+    await kvPut(env, "sys:cmdset11", "1", 604800);
   } catch (e) {
     console.log("cmdset err", e);
   }
@@ -3088,6 +3291,14 @@ async function handleCallback(env, cq) {
       return;
     }
     await setBrain(env, chatId, brain);
+  } else if (data.startsWith("hb:")) {
+    const name = decodeURIComponent(data.slice(3));
+    const h = await getHabits(env, chatId);
+    if (!h[name]) h[name] = { days: {} };
+    h[name].days[cstDateStr(Date.now())] = 1;
+    await saveHabits(env, chatId, h);
+    await tg(env, "answerCallbackQuery", { callback_query_id: cq.id, text: `✅ 「${name}」打卡成功` });
+    await sendText(env, chatId, await habitText(env, chatId));
   } else if (data.startsWith("td:")) {
     const parts = data.split(":");
     const act = parts[1];
@@ -3414,6 +3625,28 @@ async function handleUpdate(env, update) {
   }
 
   // ----- 文件阅读 -----
+  if (doc && (await kvGet(env, `awaitrestore:${chatId}`)) && (doc.file_name || "").toLowerCase().endsWith(".json")) {
+    try {
+      const info = await tg(env, "getFile", { file_id: doc.file_id });
+      const fr = await fetch(`https://api.telegram.org/file/bot${env.BOT_TOKEN}/${info?.result?.file_path}`);
+      const raw = new TextDecoder("utf-8").decode(await fr.arrayBuffer());
+      const data = JSON.parse(raw);
+      if (!data || data.app !== "dq686bot" || !data.kv) throw new Error("bad backup");
+      const allow = new Set(backupKeys(chatId));
+      let n = 0;
+      for (const [k, v] of Object.entries(data.kv)) {
+        if (!allow.has(k) || typeof v !== "string") continue;
+        await kvPut(env, k, v, 60 * 60 * 24 * 365);
+        n++;
+      }
+      if (env.BOT_KV) await env.BOT_KV.delete(`awaitrestore:${chatId}`);
+      await sendText(env, chatId, `✅ 恢复完成：写回了 ${n} 项数据（长期记忆、账本、待办、备忘、模板、提醒、习惯、日记、设置）。`);
+      return;
+    } catch (e) {
+      await sendText(env, chatId, "这个备份文件读不了或格式不对，恢复取消，你现在的数据一点没动。");
+      return;
+    }
+  }
   if (doc) {
     const name = doc.file_name || "file";
     const ext = name.includes(".") ? name.split(".").pop().toLowerCase() : "";
@@ -3845,6 +4078,39 @@ async function handleUpdate(env, update) {
     await sendText(env, chatId, "📌 取消钉住了。");
     return;
   }
+  if (text.startsWith("/backup")) {
+    const data = await collectBackup(env, chatId);
+    await sendDocument(env, chatId, JSON.stringify(data, null, 2), `xiaoduo-backup-${cstDateStr(Date.now())}.json`, "📦 这是你的全部数据备份（记忆/账本/待办/备忘/模板/提醒/习惯/日记/设置）。另外我每天自动存一份快照保留 7 天，周日还会自动发你一份冷备份。");
+    return;
+  }
+  if (text.startsWith("/restore")) {
+    await kvPut(env, `awaitrestore:${chatId}`, "1", 600);
+    await sendText(env, chatId, "把之前 /backup 导出的那个 json 文件直接发我，我就恢复（10 分钟内有效）。注意：恢复会用备份覆盖现在的数据。");
+    return;
+  }
+  if (text.startsWith("/habit")) {
+    const arg = text.slice("/habit".length).trim();
+    if (!arg) { await sendText(env, chatId, await habitText(env, chatId)); return; }
+    const names = arg.split(/[,，、]/).map((s) => s.trim()).filter(Boolean).slice(0, 8);
+    const old = await getHabits(env, chatId);
+    const h = {};
+    for (const n of names) h[n] = old[n] || { days: {} };
+    await saveHabits(env, chatId, h);
+    await sendText(env, chatId, `🔥 习惯定好啦：${names.join("、")}。每天说「打卡 习惯名」就行，比如「打卡 ${names[0]}」。`);
+    return;
+  }
+  if (text.startsWith("/diary")) {
+    const arg = text.slice("/diary".length).trim();
+    if (!arg) { await sendText(env, chatId, await diaryText(env, chatId)); return; }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(arg)) { await sendText(env, chatId, await diaryText(env, chatId, arg)); return; }
+    const d = await getDiary(env, chatId);
+    const day = cstDateStr(Date.now());
+    if (!d[day]) d[day] = [];
+    d[day].push({ ts: Date.now(), raw: arg, tidy: "" });
+    await kvPut(env, `diary:${chatId}`, JSON.stringify(d), 60 * 60 * 24 * 365);
+    await sendText(env, chatId, "📔 记进今天的日记啦。发 /diary 能看最近 7 天。");
+    return;
+  }
   if (text.startsWith("/settings")) {
     await sendSettings(env, chatId);
     return;
@@ -4249,6 +4515,10 @@ async function handleUpdate(env, update) {
   }
 
   // v6.5 关键词直答 + 聊天记账/提醒/待办 (不烧 AI 额度)
+  if (text === "⌨️ 恢复键盘") {
+    await sendText(env, chatId, "键盘恢复啦 👇", undefined, REPLY_KB, false, threadId);
+    return;
+  }
   if (await tryIntent(env, chatId, userId, text, threadId)) return;
   {
     const remMatch = text.match(/^提醒我\s*(.+)$/);
@@ -4267,6 +4537,13 @@ async function handleUpdate(env, update) {
         await sendText(env, chatId, `好，${fmtTimeCst(p.at)} 我提醒你：${p.text}`, undefined, undefined, false, threadId);
         return;
       }
+    }
+    const ck = text.match(/^打卡\s*(.*)$/);
+    if (ck) { await doCheckin(env, chatId, ck[1].trim(), threadId); return; }
+    const dask = await kvGet(env, `diaryask:${chatId}`);
+    if (dask && dask === cstDateStr(Date.now()) && !text.startsWith("/")) {
+      await saveDiaryEntry(env, chatId, text, threadId);
+      return;
     }
     const cardDigits = text.replace(/[\s-]/g, "");
     if (/^\d{15,19}$/.test(cardDigits) && luhnOk(cardDigits)) {
