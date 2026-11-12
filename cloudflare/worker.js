@@ -74,6 +74,9 @@ const HELP = `我是小多, 多情的私人 AI 助手。
 /music 歌名 - 搜歌点歌 (点结果里的数字就发歌; 也可直接说 放+歌名)
 /morning - 今日早报
 /myid - 我的 Telegram 数字 ID
+/settings - ⚙️ 设置面板 (大脑/温度/长度/预算一页搞定)
+/usage - 📈 本月 token 用量和费用估算
+/temp 0.7 - 创造性 (0 严谨 ~ 2 放飞); /max 2000 - 回复长度上限
 
 点菜单按钮也能办大部分事, 不用记命令。输入框下面还有一排常驻按钮; 直接给我发贴纸, 我会学会, 聊天对上心情时也会回你一张。`;
 
@@ -191,6 +194,151 @@ const PERSONA_KB = {
 };
 
 const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20"];
+const VERSION = "v6.4";
+
+// ---------- v6.4 设置 (温度/长度/预算) ----------
+function monthKey() {
+  const d = new Date();
+  return d.getUTCFullYear() + "-" + ("0" + (d.getUTCMonth() + 1)).slice(-2);
+}
+async function getSettings(env, chatId) {
+  const s = { temp: null, max: null, budget: 0 };
+  const raw = await kvGet(env, `set:${chatId}`);
+  if (raw) {
+    try {
+      const j = JSON.parse(raw);
+      if (typeof j.temp === "number") s.temp = j.temp;
+      if (typeof j.max === "number" && j.max > 0) s.max = j.max;
+      if (typeof j.budget === "number" && j.budget > 0) s.budget = j.budget;
+    } catch {}
+  }
+  return s;
+}
+async function saveSettings(env, chatId, s) {
+  await kvPut(env, `set:${chatId}`, JSON.stringify(s), 60 * 60 * 24 * 365);
+}
+async function chatBody(env, chatId, cfg, messages, stream) {
+  const st = await getSettings(env, chatId);
+  const body = { model: cfg.model, messages };
+  if (st.temp != null) body.temperature = st.temp;
+  if (st.max) body.max_tokens = st.max;
+  if (stream) {
+    body.stream = true;
+    body.stream_options = { include_usage: true };
+  }
+  return body;
+}
+
+// ---------- v6.4 用量记账 (token + 费用估算) ----------
+const PRICE = {
+  deepseek: { i: 2, o: 8 },
+  "deepseek-pro": { i: 4, o: 16 },
+  gptoss: { i: 0, o: 0 },
+  gptoss20: { i: 0, o: 0 },
+};
+function estCost(brainId, pin, pout) {
+  const p = PRICE[brainId] || { i: 0, o: 0 };
+  return (pin * p.i + pout * p.o) / 1000000;
+}
+async function readTok(env, key) {
+  const raw = await kvGet(env, key);
+  if (raw) {
+    try { return JSON.parse(raw); } catch {}
+  }
+  return { i: 0, o: 0, brains: {} };
+}
+async function recordUsage(env, chatId, brainId, usage) {
+  const pin = usage.prompt_tokens || 0;
+  const pout = usage.completion_tokens || 0;
+  if (!pin && !pout) return;
+  const mk = monthKey();
+  const mKey = `tok:${mk}`;
+  const m = await readTok(env, mKey);
+  m.i += pin; m.o += pout;
+  const b = m.brains[brainId] || { i: 0, o: 0 };
+  b.i += pin; b.o += pout;
+  m.brains[brainId] = b;
+  await kvPut(env, mKey, JSON.stringify(m), 60 * 60 * 24 * 70);
+  const dKey = `tokd:${new Date().toISOString().slice(0, 10)}`;
+  const d = await readTok(env, dKey);
+  d.i += pin; d.o += pout;
+  await kvPut(env, dKey, JSON.stringify(d), 60 * 60 * 24 * 4);
+  const st = await getSettings(env, chatId);
+  if (st.budget > 0) {
+    const total = m.i + m.o;
+    const pct = total / st.budget;
+    if (pct >= 1) {
+      const eco = await kvGet(env, `eco:${chatId}`);
+      if (eco !== mk) {
+        await kvPut(env, `eco:${chatId}`, mk, 60 * 60 * 24 * 40);
+        await sendText(env, chatId, `💰 本月 token 已用 ${total}，超过你设的预算 ${st.budget}，我先切到省钱模式（GPT-OSS 20B 免费档）顶着。你手动 /model 选一次大脑可以解除。`);
+      }
+    } else if (pct >= 0.8) {
+      const wKey = `tokwarn:${mk}:${chatId}`;
+      if (!(await kvGet(env, wKey))) {
+        await kvPut(env, wKey, "1", 60 * 60 * 24 * 40);
+        await sendText(env, chatId, `💰 提醒一下：本月 token 已用 ${total}，到你预算 ${st.budget} 的 80% 了。发 /usage 看明细。`);
+      }
+    }
+  }
+}
+async function usageText(env, chatId) {
+  const mk = monthKey();
+  const m = await readTok(env, `tok:${mk}`);
+  const d = await readTok(env, `tokd:${new Date().toISOString().slice(0, 10)}`);
+  let cost = 0;
+  const lines = ["📈 用量与费用（估算）", `今天：输入 ${d.i} / 输出 ${d.o} token`, `本月：输入 ${m.i} / 输出 ${m.o} token`];
+  for (const id of Object.keys(m.brains || {})) {
+    const bb = m.brains[id];
+    const c = estCost(id, bb.i, bb.o);
+    cost += c;
+    lines.push(`· ${brainConfig(env, id).label}：${bb.i + bb.o} token，约 ¥${c.toFixed(3)}`);
+  }
+  lines.push(`本月估算花费：约 ¥${cost.toFixed(2)}（DeepSeek 按官方价估算，Groq 两档免费不计费；只统计 v6.4 上线后的对话）`);
+  const st = await getSettings(env, chatId);
+  if (st.budget > 0) {
+    const total = m.i + m.o;
+    const pct = Math.floor((total / st.budget) * 100);
+    const eco = (await kvGet(env, `eco:${chatId}`)) === mk;
+    lines.push(`月预算：${st.budget} token，已用 ${pct}%${eco ? "（省钱模式中）" : ""}`);
+  } else {
+    lines.push("月预算：未设置（在 /settings 里可以设，超支自动切免费档）");
+  }
+  return lines.join(NL);
+}
+
+// ---------- v6.4 对话自动总结压缩 ----------
+async function rollMem(env, chatId, memKey, history, cfg) {
+  if (history.length <= MEM_ROUNDS * 2) return history;
+  try {
+    const keep = history.slice(-12);
+    const overflow = history.slice(0, history.length - 12);
+    const prev = (await kvGet(env, `sum:${memKey}`)) || "";
+    const render = overflow.map((mm) => `${mm.role === "user" ? "主人" : "小多"}：${String(mm.content || "").slice(0, 500)}`).join(NL).slice(-6000);
+    const sc = brainConfig(env, "gptoss20").key ? brainConfig(env, "gptoss20") : cfg;
+    const prompt = [
+      "把下面这段对话压缩成不超过 250 字的中文摘要，保留：聊过的话题、主人的偏好和决定、没聊完的事。不要寒暄，直接给摘要正文。",
+      prev ? `已有旧摘要：${prev}` : "",
+      "新对话：",
+      render,
+    ].filter(Boolean).join(NL);
+    const r = await fetch(`${sc.base}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${sc.key}` },
+      body: JSON.stringify({ model: sc.model, messages: [{ role: "user", content: prompt }], max_tokens: 400 }),
+    });
+    if (!r.ok) throw new Error("sum http " + r.status);
+    const data = await r.json();
+    const digest = (data.choices?.[0]?.message?.content || "").trim().slice(0, 900);
+    if (!digest) throw new Error("sum empty");
+    await kvPut(env, `sum:${memKey}`, digest, 60 * 60 * 24 * 7);
+    return keep;
+  } catch (e) {
+    console.log("rollMem err", e);
+    return history.slice(-MEM_ROUNDS * 2);
+  }
+}
+
 const TEXT_EXTS = [
   "txt", "md", "markdown", "json", "csv", "log", "py", "js", "ts", "html",
   "htm", "css", "xml", "yml", "yaml", "ini", "sh", "java", "c", "cpp", "h",
@@ -248,7 +396,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v5.6)", {
+      return new Response("dq686bot is alive (cloudflare worker v6.4)", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
@@ -726,6 +874,8 @@ function brainConfig(env, brain) {
 }
 
 async function getBrain(env, chatId) {
+  const eco = await kvGet(env, `eco:${chatId}`);
+  if (eco && eco === monthKey() && brainConfig(env, "gptoss20").key) return "gptoss20";
   const saved = await kvGet(env, `brain:${chatId}`);
   if (BRAIN_IDS.includes(saved) && brainConfig(env, saved).key) return saved;
   if (env.DEEPSEEK_API_KEY) return "deepseek";
@@ -765,8 +915,10 @@ async function aiChat(env, chatId, userText, historyText, opts = {}) {
       }
     }
   }
+  const digest = ghost ? "" : (await kvGet(env, `sum:${memKey}`)) || "";
   const messages = [
     { role: "system", content: await buildSystem(env, chatId, cfg.label) },
+    ...(digest ? [{ role: "system", content: `你们早先聊过的内容摘要 (背景参考, 别主动复述): ${digest}` }] : []),
     ...history,
     { role: "user", content: userText },
   ];
@@ -777,15 +929,32 @@ async function aiChat(env, chatId, userText, historyText, opts = {}) {
       "Content-Type": "application/json",
       Authorization: `Bearer ${cfg.key}`,
     },
-    body: JSON.stringify({ model: cfg.model, messages }),
+    body: JSON.stringify(await chatBody(env, chatId, cfg, messages, false)),
   });
+  let data = null;
   if (!r.ok) {
-    const err = new Error(`AI HTTP ${r.status}`);
-    err.status = r.status;
-    err.brain = cfg.id;
-    throw err;
+    const altId = ["gptoss", "deepseek", "gptoss20", "deepseek-pro"].find((id) => id !== cfg.id && brainConfig(env, id).key);
+    if (altId && r.status !== 401 && r.status !== 402) {
+      const alt = brainConfig(env, altId);
+      try {
+        const r2 = await fetch(`${alt.base}/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${alt.key}` },
+          body: JSON.stringify(await chatBody(env, chatId, alt, messages, false)),
+        });
+        if (r2.ok) { data = await r2.json(); cfg = alt; brain = altId; fellBack = true; }
+      } catch {}
+    }
+    if (!data) {
+      const err = new Error(`AI HTTP ${r.status}`);
+      err.status = r.status;
+      err.brain = cfg.id;
+      throw err;
+    }
+  } else {
+    data = await r.json();
   }
-  const data = await r.json();
+  if (data.usage) { try { await recordUsage(env, chatId, cfg.id, data.usage); } catch {} }
   let reply = (data.choices?.[0]?.message?.content || "").trim();
   const ms = Date.now() - t0;
   await kvPut(
@@ -799,7 +968,7 @@ async function aiChat(env, chatId, userText, historyText, opts = {}) {
       { role: "user", content: historyText || userText },
       { role: "assistant", content: reply }
     );
-    while (history.length > MEM_ROUNDS * 2) history.shift();
+    history = await rollMem(env, chatId, memKey, history, cfg);
     await kvPut(env, memKey, JSON.stringify(history), 60 * 60 * 24 * 7);
   }
   if (opts.plain) {
@@ -845,8 +1014,10 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
       try { history = JSON.parse(raw); } catch { history = []; }
     }
   }
+  const digest = ghost ? "" : (await kvGet(env, `sum:${memKey}`)) || "";
   const messages = [
     { role: "system", content: await buildSystem(env, chatId, cfg.label) },
+    ...(digest ? [{ role: "system", content: `你们早先聊过的内容摘要 (背景参考, 别主动复述): ${digest}` }] : []),
     ...history,
     { role: "user", content: userText },
   ];
@@ -854,9 +1025,15 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
   const r = await fetch(`${cfg.base}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.key}` },
-    body: JSON.stringify({ model: cfg.model, messages, stream: true }),
+    body: JSON.stringify(await chatBody(env, chatId, cfg, messages, true)),
   });
   if (!r.ok || !r.body) {
+    const altId = ["gptoss", "deepseek", "gptoss20"].find((id) => id !== cfg.id && brainConfig(env, id).key);
+    if (altId && r.status !== 401 && r.status !== 402) {
+      const reply2 = await aiChat(env, chatId, userText, historyText, { ...(opts || {}), brain: altId });
+      if (onPartial) { try { await onPartial(reply2); } catch {} }
+      return reply2;
+    }
     const err = new Error(`AI HTTP ${r.status}`);
     err.status = r.status;
     err.brain = cfg.id;
@@ -880,6 +1057,7 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
       if (payload === "[DONE]") continue;
       try {
         const j = JSON.parse(payload);
+        if (j.usage) { try { await recordUsage(env, chatId, cfg.id, j.usage); } catch {} }
         const piece = j.choices?.[0]?.delta?.content || "";
         if (piece) reply += piece;
       } catch {}
@@ -899,7 +1077,15 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
     }
   }
   reply = reply.trim();
-  if (!reply) throw new Error("empty stream reply");
+  if (!reply) {
+    const altId = ["gptoss", "deepseek", "gptoss20"].find((id) => id !== cfg.id && brainConfig(env, id).key);
+    if (altId) {
+      const reply2 = await aiChat(env, chatId, userText, historyText, { ...(opts || {}), brain: altId });
+      if (onPartial) { try { await onPartial(reply2); } catch {} }
+      return reply2;
+    }
+    throw new Error("empty stream reply");
+  }
   const ms = Date.now() - t0;
   await kvPut(env, `last:${chatId}`, JSON.stringify({ brain: cfg.id, ms, at: Date.now() }), 60 * 60 * 24 * 7);
   if (!ghost) {
@@ -907,7 +1093,7 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
       { role: "user", content: historyText || userText },
       { role: "assistant", content: reply }
     );
-    while (history.length > MEM_ROUNDS * 2) history.shift();
+    history = await rollMem(env, chatId, memKey, history, cfg);
     await kvPut(env, memKey, JSON.stringify(history), 60 * 60 * 24 * 7);
   }
   if (opts && opts.plain) {
@@ -1157,8 +1343,100 @@ async function sendModelPicker(env, chatId) {
 
 async function setBrain(env, chatId, brain) {
   await kvPut(env, `brain:${chatId}`, brain);
+  if (env.BOT_KV) await env.BOT_KV.delete(`eco:${chatId}`);
   const label = brainConfig(env, brain).label;
   await sendText(env, chatId, `好, 大脑切到 ${label} 了, 聊天记录照旧, 继续聊吧。`, undefined, MENU_KB);
+}
+
+
+// ---------- v6.4 设置面板 ----------
+function settingsKb(auto) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "🧠 DeepSeek", callback_data: "st:brain:deepseek" },
+        { text: "🤔 深度思考", callback_data: "st:brain:deepseek-pro" },
+      ],
+      [
+        { text: "⚡ GPT-OSS 120B", callback_data: "st:brain:gptoss" },
+        { text: "🚀 GPT-OSS 20B", callback_data: "st:brain:gptoss20" },
+      ],
+      [{ text: `🤖 智能选模型：${auto ? "开" : "关"}`, callback_data: "st:auto" }],
+      [
+        { text: "🌡️ 温度 0.3", callback_data: "st:temp:0.3" },
+        { text: "🌡️ 0.7", callback_data: "st:temp:0.7" },
+        { text: "🌡️ 1.2", callback_data: "st:temp:1.2" },
+      ],
+      [
+        { text: "📏 短 800", callback_data: "st:max:800" },
+        { text: "📏 中 2000", callback_data: "st:max:2000" },
+        { text: "📏 长 4000", callback_data: "st:max:4000" },
+        { text: "📏 不限", callback_data: "st:max:0" },
+      ],
+      [
+        { text: "💰 预算关", callback_data: "st:budget:0" },
+        { text: "💰 10万", callback_data: "st:budget:100000" },
+        { text: "💰 50万", callback_data: "st:budget:500000" },
+        { text: "💰 100万", callback_data: "st:budget:1000000" },
+      ],
+      [{ text: "📈 查看用量", callback_data: "st:usage" }],
+    ],
+  };
+}
+async function settingsText(env, chatId) {
+  const brain = await getBrain(env, chatId);
+  const auto = (await kvGet(env, `auto:${chatId}`)) === "1";
+  const eco = (await kvGet(env, `eco:${chatId}`)) === monthKey();
+  const st = await getSettings(env, chatId);
+  const m = await readTok(env, `tok:${monthKey()}`);
+  return [
+    "⚙️ 小多设置",
+    `大脑：${brainConfig(env, brain).label}${auto ? "（智能选模型开）" : ""}${eco ? "（省钱模式中，手动选大脑可解除）" : ""}`,
+    `温度：${st.temp == null ? "默认" : st.temp}（越高越放飞）`,
+    `回复长度上限：${st.max ? st.max + " token" : "默认"}`,
+    `月 token 预算：${st.budget ? st.budget + `（本月已用 ${m.i + m.o}）` : "未设置"}`,
+    "",
+    "点按钮直接改，立刻生效。也可用命令：/temp 0.7、/max 2000、/usage。",
+  ].join(NL);
+}
+async function sendSettings(env, chatId, editId) {
+  const auto = (await kvGet(env, `auto:${chatId}`)) === "1";
+  const text = await settingsText(env, chatId);
+  const kb = settingsKb(auto);
+  if (editId) await editOrSend(env, chatId, editId, text, kb);
+  else await sendText(env, chatId, text, undefined, kb);
+}
+async function handleSettingsCallback(env, cq, chatId) {
+  const parts = (cq.data || "").split(":");
+  const kind = parts[1];
+  if (kind === "usage") {
+    await sendText(env, chatId, await usageText(env, chatId), undefined, MENU_KB);
+    return;
+  }
+  if (kind === "brain") {
+    const target = parts[2];
+    if (BRAIN_IDS.includes(target) && brainConfig(env, target).key) {
+      await kvPut(env, `brain:${chatId}`, target);
+      if (env.BOT_KV) await env.BOT_KV.delete(`eco:${chatId}`);
+    }
+  } else if (kind === "auto") {
+    const cur = (await kvGet(env, `auto:${chatId}`)) === "1";
+    await kvPut(env, `auto:${chatId}`, cur ? "0" : "1");
+  } else if (kind === "temp") {
+    const st = await getSettings(env, chatId);
+    st.temp = parseFloat(parts[2]);
+    await saveSettings(env, chatId, st);
+  } else if (kind === "max") {
+    const st = await getSettings(env, chatId);
+    const n = parseInt(parts[2], 10);
+    st.max = n > 0 ? n : null;
+    await saveSettings(env, chatId, st);
+  } else if (kind === "budget") {
+    const st = await getSettings(env, chatId);
+    st.budget = parseInt(parts[2], 10) || 0;
+    await saveSettings(env, chatId, st);
+  }
+  await sendSettings(env, chatId, cq.message?.message_id);
 }
 
 // ---------- 读链接 ----------
@@ -1738,7 +2016,7 @@ async function statusText(env, chatId, userId) {
     }
   }
   return [
-    "📊 小多状态卡",
+    `📊 小多状态卡 (${VERSION})`,
     `大脑: ${brainConfig(env, brain).label}${auto ? " (智能选模型: 开)" : ""}`,
     `人设: ${(PERSONAS[personaId] || PERSONAS.default).label}`,
     `假装失忆: ${ghost ? "开 (不读不存记忆)" : "关"}`,
@@ -1993,7 +2271,7 @@ function keepTyping(env, chatId, action, threadId) {
 
 async function ensureBotCommands(env) {
   try {
-    if (await kvGet(env, "sys:cmdset7")) return;
+    if (await kvGet(env, "sys:cmdset8")) return;
     await tg(env, "setMyCommands", {
       commands: [
         { command: "start", description: "🏠 打开菜单" },
@@ -2015,10 +2293,13 @@ async function ensureBotCommands(env) {
         { command: "stickers", description: "🎴 我学会的贴纸" },
         { command: "addpack", description: "🎴 整包添加表情包" },
         { command: "export", description: "📦 导出我的记忆" },
+        { command: "settings", description: "⚙️ 设置面板 (大脑/温度/长度/预算)" },
+        { command: "usage", description: "📈 用量与费用" },
+        { command: "temp", description: "🌡️ 创造性, 例: /temp 0.7" },
         { command: "myid", description: "🆔 我的数字 ID" },
       ],
     });
-    await kvPut(env, "sys:cmdset7", "1", 604800);
+    await kvPut(env, "sys:cmdset8", "1", 604800);
   } catch (e) {
     console.log("cmdset err", e);
   }
@@ -2126,6 +2407,7 @@ async function handleCallback(env, cq) {
     await sendText(env, chatId, HELP, undefined, MENU_KB);
   } else if (data === "m:new") {
     if (env.BOT_KV) await env.BOT_KV.delete(`mem:${chatId}`);
+    if (env.BOT_KV) await env.BOT_KV.delete(`sum:${chatId}`);
     await sendText(env, chatId, "记忆清空了, 咱重新聊。", undefined, MENU_KB);
   } else if (data === "m:draw") {
     await kvPut(env, `awaitdraw:${chatId}`, "1", 300);
@@ -2208,6 +2490,8 @@ async function handleCallback(env, cq) {
       return;
     }
     await setBrain(env, chatId, brain);
+  } else if (data.startsWith("st:")) {
+    await handleSettingsCallback(env, cq, chatId);
   }
 }
 
@@ -2677,6 +2961,7 @@ async function handleUpdate(env, update) {
   }
   if (text.startsWith("/new")) {
     if (env.BOT_KV) await env.BOT_KV.delete(memKey);
+    if (env.BOT_KV) await env.BOT_KV.delete(`sum:${memKey}`);
     await sendText(env, chatId, threadId ? "这个话题的记忆清空了, 咱重新聊。" : "记忆清空了, 咱重新聊。", undefined, MENU_KB);
     return;
   }
@@ -2790,6 +3075,48 @@ async function handleUpdate(env, update) {
         ? "智能选模型关了, 之后都用你选定的大脑。"
         : "智能选模型开了: 闲聊自动走快档, 代码和难题自动走 DeepSeek 强档。想手动锁死就 /model 选一个再把 /auto 关掉。"
     );
+    return;
+  }
+  if (text.startsWith("/settings")) {
+    await sendSettings(env, chatId);
+    return;
+  }
+  if (text.startsWith("/usage")) {
+    await sendText(env, chatId, await usageText(env, chatId), undefined, MENU_KB);
+    return;
+  }
+  if (text.startsWith("/temp")) {
+    const arg = text.slice("/temp".length).trim();
+    const st = await getSettings(env, chatId);
+    if (arg) {
+      const v = parseFloat(arg);
+      if (isNaN(v) || v < 0 || v > 2) {
+        await sendText(env, chatId, "温度范围 0 到 2：0 最严谨，0.7 日常，1.2 以上开始放飞。格式：/temp 0.7");
+        return;
+      }
+      st.temp = v;
+      await saveSettings(env, chatId, st);
+      await sendText(env, chatId, `好，温度设成 ${v} 了。`);
+      return;
+    }
+    await sendText(env, chatId, `当前温度：${st.temp == null ? "默认" : st.temp}。改它发 /temp 数字（0~2）。`);
+    return;
+  }
+  if (text.startsWith("/maxtokens") || text.startsWith("/max")) {
+    const arg = text.replace(/^\/(maxtokens|max)/, "").trim();
+    const st = await getSettings(env, chatId);
+    if (arg) {
+      const v = parseInt(arg, 10);
+      if (isNaN(v) || v < 0 || v > 8000) {
+        await sendText(env, chatId, "长度上限 0 到 8000 token，0 = 不限。格式：/max 2000");
+        return;
+      }
+      st.max = v > 0 ? v : null;
+      await saveSettings(env, chatId, st);
+      await sendText(env, chatId, v > 0 ? `好，回复长度上限设成 ${v} token 了。` : "好，回复长度不限了。");
+      return;
+    }
+    await sendText(env, chatId, `当前长度上限：${st.max ? st.max + " token" : "默认（不限）"}。改它发 /max 数字。`);
     return;
   }
   if (text.startsWith("/panel")) {
