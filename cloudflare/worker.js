@@ -202,7 +202,7 @@ const PERSONA_KB = {
 };
 
 const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20"];
-const VERSION = "v6.6";
+const VERSION = "v6.6.1";
 
 // ---------- v6.4 设置 (温度/长度/预算) ----------
 function monthKey() {
@@ -386,6 +386,7 @@ async function buildSystem(env, chatId, brainLabel) {
   const P = PERSONAS[personaId] || PERSONAS.default;
   if (P.style) lines.push(P.style);
   lines.push("你自带点歌功能: 主人想听歌时, 他点菜单里的「🎵 音乐」按钮或发 /music 歌名, 你就能把歌以音乐文件的形式发给他听。不要说你放不了音乐、只能发文字, 那是错的。");
+  lines.push("你就是 Telegram 机器人小多本人, 不只是聊天模型。你能听懂语音 (主人发来的语音会被转成文字再给你, 永远不要说你听不见、没耳朵), 能看图片, 自带提醒/记账/待办/备忘/点歌/画图功能。主人让你设提醒或记账但说法没对上时, 用一句话告诉他正确说法 (比如: 提醒我 明天9点 交报告), 不要教他写代码自己实现, 更不要声称你做不到。");
   const ghost = (await kvGet(env, `ghost:${chatId}`)) === "1";
   if (!ghost) {
     const prefs = await getPrefs(env, chatId);
@@ -406,7 +407,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v6.6)", {
+      return new Response("dq686bot is alive (cloudflare worker v6.6.1)", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
@@ -1818,13 +1819,15 @@ function parseRemind2(arg) {
   const s0 = String(arg || "").trim();
   const p = parseRemind(s0);
   if (p) return p;
-  let m = s0.match(/^(今天|今晚|明天|明早|明晚|后天)\s*(?:晚上|早上|上午|下午|中午)?\s*(\d{1,2})[:：点](\d{2}|半)?\s*(.+)$/);
+  let m = s0.match(/^(今天|今晚|明天|明早|明晚|后天)\s*(?:晚上|早上|上午|下午|中午)?\s*(\d{1,2})[:：点](\d{2}|半)?\s*(.*)$/);
   if (m) {
     const off = m[1] === "明天" || m[1] === "明早" || m[1] === "明晚" ? 1 : m[1] === "后天" ? 2 : 0;
     let hh = parseInt(m[2], 10);
     const mm = m[3] === "半" ? 30 : parseInt(m[3] || "0", 10);
     if (/晚|下午/.test(s0) && hh < 12) hh += 12;
-    return { at: cstDayStart(Date.now()) + off * 86400000 + hh * 3600000 + mm * 60000, text: m[4].trim() };
+    if (/中午/.test(s0) && hh >= 1 && hh <= 2) hh += 12;
+    const txt = m[4].replace(/(叫我|喊我|提醒我)+$/, "").trim();
+    return { at: cstDayStart(Date.now()) + off * 86400000 + hh * 3600000 + mm * 60000, text: txt || "到点啦" };
   }
   m = s0.match(/^(明天|后天|明早)\s+(.+)$/);
   if (m) {
@@ -4249,8 +4252,13 @@ async function handleUpdate(env, update) {
   if (await tryIntent(env, chatId, userId, text, threadId)) return;
   {
     const remMatch = text.match(/^提醒我\s*(.+)$/);
-    if (remMatch) {
-      const p = parseRemind2(remMatch[1]);
+    let remP = remMatch ? parseRemind2(remMatch[1]) : null;
+    if (!remP && text.length <= 30 && /(叫我|喊我)/.test(text) && /(明天|今天|今晚|明早|明晚|后天|点|[:：]|分钟后|小时后)/.test(text)) {
+      const cand = text.replace(/提醒我/g, "").replace(/叫我/g, "").replace(/喊我/g, "").trim();
+      if (cand && cand !== text) remP = parseRemind2(cand);
+    }
+    if (remP) {
+      const p = remP;
       if (p) {
         const list = await getReminders(env, chatId);
         list.push(p);
