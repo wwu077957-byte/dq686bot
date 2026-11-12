@@ -77,6 +77,13 @@ const HELP = `我是小多, 多情的私人 AI 助手。
 /settings - ⚙️ 设置面板 (大脑/温度/长度/预算一页搞定)
 /usage - 📈 本月 token 用量和费用估算
 /temp 0.7 - 创造性 (0 严谨 ~ 2 放飞); /max 2000 - 回复长度上限
+/bill - 🧾 账本 (聊天里直接发「午饭35」自动记账; /bill 点评 有 AI 点评)
+/todo 周五前交报告 - ✅ 待办; /todos 看清单 (说「周五前…」也会自动记)
+/note 内容 - 📝 备忘; /notes 关键词 - 搜备忘
+/save 名字 内容 - 💾 存提示词模板; /use 名字 - 调用模板
+/tr /sum /fix /en 内容 - 翻译/总结/改错字/转英文 (也可引用消息)
+/undo - ↩️ 撤销上一步 (记账/待办/备忘/提醒/模板)
+关键词直答: 问「还有多久过年」「服务器状态」「用量」直接秒回, 不烧额度
 
 点菜单按钮也能办大部分事, 不用记命令。输入框下面还有一排常驻按钮; 直接给我发贴纸, 我会学会, 聊天对上心情时也会回你一张。`;
 
@@ -194,7 +201,7 @@ const PERSONA_KB = {
 };
 
 const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20"];
-const VERSION = "v6.4";
+const VERSION = "v6.5";
 
 // ---------- v6.4 设置 (温度/长度/预算) ----------
 function monthKey() {
@@ -396,7 +403,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v6.4)", {
+      return new Response("dq686bot is alive (cloudflare worker v6.5)", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
@@ -422,6 +429,7 @@ export default {
     ctx.waitUntil(
       (async () => {
         await fireDueReminders(env).catch((e) => console.log("remind err", e));
+        await fireDueTodos(env).catch((e) => console.log("todo err", e));
         if (!event.cron || event.cron === "0 0 * * *") {
           await sendBriefing(env).catch((e) => console.log("briefing err", e));
         }
@@ -1349,6 +1357,300 @@ async function setBrain(env, chatId, brain) {
 }
 
 
+
+// ---------- v6.5 生活组: 记账/待办/备忘/模板 + 关键词直答 ----------
+const STATUS_URL = "https://104.168.92.194.sslip.io:8444/duoqing/status-cd9b3ebfde.json";
+function uid() { return Date.now().toString(36) + Math.floor(Math.random() * 1296).toString(36); }
+async function kvList(env, key) {
+  const raw = await kvGet(env, key);
+  if (!raw) return [];
+  try { const a = JSON.parse(raw); return Array.isArray(a) ? a : []; } catch { return []; }
+}
+async function pushUndo(env, chatId, item) {
+  const a = await kvList(env, `undo:${chatId}`);
+  a.push(item);
+  await kvPut(env, `undo:${chatId}`, JSON.stringify(a.slice(-5)), 60 * 60 * 24);
+}
+function cstDayStart(ts) {
+  const c = new Date(ts + 8 * 3600 * 1000);
+  return Date.UTC(c.getUTCFullYear(), c.getUTCMonth(), c.getUTCDate()) - 8 * 3600 * 1000;
+}
+
+// --- 记账 ---
+const BILL_CATS = [
+  ["餐饮", /饭|餐|吃|面|粉|粥|外卖|奶茶|咖啡|茶|饮料|酒|烟|槟榔|零食|水果|买菜|冰红茶/],
+  ["交通", /车|油|打车|地铁|公交|机票|高铁|停车/],
+  ["购物", /买|购物|衣服|鞋|淘宝|拼多多|京东|超市/],
+  ["通讯", /话费|流量|宽带/],
+  ["娱乐", /游戏|电影|会员|充值|皮肤|ktv/i],
+  ["居住", /房租|水电|物业|房贷/],
+  ["学习", /书|课|教程|学费/],
+  ["医疗", /药|医院|看病|体检/],
+];
+function billCat(note) { for (const [c, re] of BILL_CATS) if (re.test(note)) return c; return "其他"; }
+async function getBills(env, chatId) { return kvList(env, `bill:${chatId}`); }
+async function addBill(env, chatId, amt, note, income) {
+  const list = await getBills(env, chatId);
+  const it = { id: uid(), amt, note: note || "", cat: billCat(note || ""), inc: !!income, ts: Date.now() };
+  list.push(it);
+  await kvPut(env, `bill:${chatId}`, JSON.stringify(list.slice(-500)));
+  await pushUndo(env, chatId, { kind: "bill", id: it.id });
+  return it;
+}
+function billSums(list, now) {
+  const ds = cstDayStart(now);
+  const dm = new Date(now + 8 * 3600 * 1000);
+  const ms = Date.UTC(dm.getUTCFullYear(), dm.getUTCMonth(), 1) - 8 * 3600 * 1000;
+  const ws = ds - ((dm.getUTCDay() + 6) % 7) * 86400000;
+  let d = 0, w = 0, m = 0, inc = 0;
+  const cats = {};
+  for (const b of list) {
+    if (b.inc) { if (b.ts >= ms) inc += b.amt; continue; }
+    if (b.ts >= ds) d += b.amt;
+    if (b.ts >= ws) w += b.amt;
+    if (b.ts >= ms) { m += b.amt; cats[b.cat] = (cats[b.cat] || 0) + b.amt; }
+  }
+  return { d, w, m, inc, cats };
+}
+async function billText(env, chatId) {
+  const list = await getBills(env, chatId);
+  const s = billSums(list, Date.now());
+  const lines = ["🧾 账本", `今日支出 ¥${s.d.toFixed(2)} · 本周 ¥${s.w.toFixed(2)} · 本月 ¥${s.m.toFixed(2)}`];
+  if (s.inc) lines.push(`本月收入 ¥${s.inc.toFixed(2)} · 净支出 ¥${(s.m - s.inc).toFixed(2)}`);
+  const top = Object.entries(s.cats).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  if (top.length) { lines.push("本月分类:"); for (const [c, v] of top) lines.push(`· ${c} ¥${v.toFixed(2)}`); }
+  const recent = list.slice(-5).reverse();
+  if (recent.length) { lines.push("最近:"); for (const b of recent) lines.push(`· ${b.inc ? "+" : "-"}¥${b.amt} ${b.note} (${new Date(b.ts + 8 * 3600 * 1000).toISOString().slice(5, 10)})`); }
+  return lines.join(NL);
+}
+function parseBillChat(text) {
+  const t = String(text || "").trim();
+  if (t.length > 24 || t.startsWith("/") || /听|唱|音乐|歌名/.test(t)) return null;
+  let m = t.match(/^(收入|到账|工资|赚了|挣了)\s*(\d+(?:\.\d{1,2})?)\s*(元|块)?\s*(.*)$/);
+  if (m) return { amt: parseFloat(m[2]), note: (m[4] || m[1]).trim(), income: true };
+  m = t.match(/^(.{1,12}?)\s*(\d+(?:\.\d{1,2})?)\s*(元|块)\s*(.*)$/);
+  if (m && !/^\d/.test(m[1])) return { amt: parseFloat(m[2]), note: (m[1] + " " + (m[4] || "")).trim(), income: false };
+  m = t.match(/^(.{1,10}?)\s*(\d+(?:\.\d{1,2})?)$/);
+  if (m && /[\u4e00-\u9fa5]/.test(m[1]) && !/^\d/.test(m[1])) return { amt: parseFloat(m[2]), note: m[1].trim(), income: false };
+  return null;
+}
+
+// --- 待办 ---
+async function getTodos(env, chatId) { return kvList(env, `todo:${chatId}`); }
+async function setTodos(env, chatId, a) { await kvPut(env, `todo:${chatId}`, JSON.stringify(a.slice(-200))); }
+function parseDue(text) {
+  let s = String(text || "").trim();
+  const now = Date.now();
+  const dayMs = 86400000;
+  const today0 = cstDayStart(now);
+  let due = null;
+  const wd = { 日: 0, 天: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6 };
+  const curWd = new Date(now + 8 * 3600 * 1000).getUTCDay();
+  let m = s.match(/下周([一二三四五六日天])/);
+  if (m) { let add = (wd[m[1]] - curWd + 7) % 7; if (add === 0) add = 7; due = today0 + (add + 7) * dayMs + 9 * 3600000; s = s.replace(m[0], " "); }
+  else if ((m = s.match(/周([一二三四五六日天])/))) { const add = (wd[m[1]] - curWd + 7) % 7; due = today0 + add * dayMs + 9 * 3600000; s = s.replace(m[0], " "); }
+  else if ((m = s.match(/今天|今晚|明天|明早|明晚|后天/))) { const off = m[0] === "明天" || m[0] === "明早" || m[0] === "明晚" ? 1 : m[0] === "后天" ? 2 : 0; due = today0 + off * dayMs + 9 * 3600000; s = s.replace(m[0], " "); }
+  const tm = s.match(/(\d{1,2})[:：](\d{2})|(\d{1,2})点(半|\d{1,2}分?)?/);
+  if (tm) {
+    const hh = parseInt(tm[1] || tm[3], 10);
+    const mm = tm[2] != null ? parseInt(tm[2], 10) : tm[4] === "半" ? 30 : tm[4] ? parseInt(tm[4], 10) : 0;
+    let h2 = hh;
+    if (/晚上|下午|今晚|明晚/.test(text) && h2 < 12) h2 += 12;
+    if (due == null) { due = today0 + h2 * 3600000 + mm * 60000; if (due <= now) due += dayMs; }
+    else due = due - 9 * 3600000 + h2 * 3600000 + mm * 60000;
+    s = s.replace(tm[0], " ");
+  }
+  s = s.replace(/\s+/g, " ").replace(/^(前|之前|截止|记得|要)\s*/, "").replace(/前$/, "").trim();
+  return { due, text: s };
+}
+function parseTodoChat(text) {
+  const t = String(text || "").trim();
+  if (t.length > 30 || t.startsWith("/") || /[吗？?]/.test(t)) return null;
+  let body = null;
+  if (/^待办[:：]?\s*/.test(t)) body = t.replace(/^待办[:：]?\s*/, "");
+  else if (/(周[一二三四五六日天]|明天|后天|今晚|明早).{0,4}前/.test(t)) body = t;
+  if (!body) return null;
+  const p = parseDue(body);
+  if (!p.text || p.text.length < 2) return null;
+  return p;
+}
+async function sendTodos(env, chatId, editId) {
+  const list = await getTodos(env, chatId);
+  const open = list.filter((x) => !x.done);
+  const doneN = list.length - open.length;
+  if (!open.length) {
+    const t = `✅ 待办全清了${doneN ? `（已完成 ${doneN} 件）` : ""}。发 /todo 内容就能加，比如 /todo 周五前交报告。`;
+    if (editId) await editOrSend(env, chatId, editId, t);
+    else await sendText(env, chatId, t, undefined, MENU_KB);
+    return;
+  }
+  const sorted = [...open].sort((a, b) => (a.due || 9e15) - (b.due || 9e15));
+  const lines = ["✅ 我的待办:", ...sorted.map((x, i) => `${i + 1}. ${x.text}${x.due ? `（${fmtTimeCst(x.due)}）` : ""}`)];
+  if (doneN) lines.push(`已完成 ${doneN} 件`);
+  const rows = sorted.map((x, i) => [{ text: `✅ 完成第 ${i + 1} 件`, callback_data: `td:done:${x.id}` }, { text: "❌", callback_data: `td:del:${x.id}` }]);
+  if (editId) await editOrSend(env, chatId, editId, lines.join(NL), { inline_keyboard: rows });
+  else await sendText(env, chatId, lines.join(NL), undefined, { inline_keyboard: rows });
+}
+async function fireDueTodos(env) {
+  const allow = [...allowedIds(env)];
+  const chatId = allow[0] || (await kvGet(env, "owner"));
+  if (!chatId) return;
+  const list = await getTodos(env, chatId);
+  const now = Date.now();
+  const due = list.filter((x) => !x.done && x.due && x.due <= now && !x.nf);
+  if (!due.length) return;
+  for (const x of list) if (!x.done && x.due && x.due <= now && !x.nf) x.nf = 1;
+  await setTodos(env, chatId, list);
+  for (const x of due) await sendText(env, chatId, `✅ 待办到时间了：${x.text}（发 /todos 标记完成）`);
+}
+
+// --- 备忘 ---
+async function getNotes(env, chatId) { return kvList(env, `note:${chatId}`); }
+async function addNote(env, chatId, text) {
+  const list = await getNotes(env, chatId);
+  const it = { id: uid(), text: String(text).slice(0, 500), ts: Date.now() };
+  list.push(it);
+  await kvPut(env, `note:${chatId}`, JSON.stringify(list.slice(-300)));
+  await pushUndo(env, chatId, { kind: "note", id: it.id });
+  return it;
+}
+
+// --- 模板 ---
+async function getTpls(env, chatId) {
+  const raw = await kvGet(env, `tpl:${chatId}`);
+  if (!raw) return {};
+  try { const o = JSON.parse(raw); return o && typeof o === "object" ? o : {}; } catch { return {}; }
+}
+
+// --- 快捷 AI (不带记忆) ---
+async function quickComplete(env, sys, input) {
+  for (const id of ["gptoss20", "gptoss", "deepseek"]) {
+    const cfg = brainConfig(env, id);
+    if (!cfg.key) continue;
+    try {
+      const r = await fetch(`${cfg.base}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.key}` },
+        body: JSON.stringify({ model: cfg.model, messages: [{ role: "system", content: sys }, { role: "user", content: input }], max_tokens: 2000 }),
+      });
+      if (!r.ok) continue;
+      const data = await r.json();
+      const out = (data.choices?.[0]?.message?.content || "").trim();
+      if (out) return out;
+    } catch {}
+  }
+  throw new Error("quick ai unavailable");
+}
+
+// --- 自然语言提醒 v2 (在 parseRemind 之上加日期词) ---
+function parseRemind2(arg) {
+  const s0 = String(arg || "").trim();
+  const p = parseRemind(s0);
+  if (p) return p;
+  let m = s0.match(/^(今天|今晚|明天|明早|明晚|后天)\s*(?:晚上|早上|上午|下午|中午)?\s*(\d{1,2})[:：点](\d{2}|半)?\s*(.+)$/);
+  if (m) {
+    const off = m[1] === "明天" || m[1] === "明早" || m[1] === "明晚" ? 1 : m[1] === "后天" ? 2 : 0;
+    let hh = parseInt(m[2], 10);
+    const mm = m[3] === "半" ? 30 : parseInt(m[3] || "0", 10);
+    if (/晚|下午/.test(s0) && hh < 12) hh += 12;
+    return { at: cstDayStart(Date.now()) + off * 86400000 + hh * 3600000 + mm * 60000, text: m[4].trim() };
+  }
+  m = s0.match(/^(明天|后天|明早)\s+(.+)$/);
+  if (m) {
+    const off = m[1] === "后天" ? 2 : 1;
+    return { at: cstDayStart(Date.now()) + off * 86400000 + 9 * 3600000, text: m[2].trim() };
+  }
+  return null;
+}
+
+// --- 撤销 ---
+async function doUndo(env, chatId) {
+  const a = await kvList(env, `undo:${chatId}`);
+  const last = a.pop();
+  if (!last) { await sendText(env, chatId, "没啥可撤销的。"); return; }
+  await kvPut(env, `undo:${chatId}`, JSON.stringify(a), 60 * 60 * 24);
+  if (last.kind === "bill") {
+    const l = await getBills(env, chatId);
+    await kvPut(env, `bill:${chatId}`, JSON.stringify(l.filter((x) => x.id !== last.id)));
+    await sendText(env, chatId, "↩️ 撤了刚才那笔账。");
+  } else if (last.kind === "todo") {
+    const l = await getTodos(env, chatId);
+    await setTodos(env, chatId, l.filter((x) => x.id !== last.id));
+    await sendText(env, chatId, "↩️ 撤了刚才那条待办。");
+  } else if (last.kind === "note") {
+    const l = await getNotes(env, chatId);
+    await kvPut(env, `note:${chatId}`, JSON.stringify(l.filter((x) => x.id !== last.id)));
+    await sendText(env, chatId, "↩️ 撤了刚才那条备忘。");
+  } else if (last.kind === "remind") {
+    const l = await getReminders(env, chatId);
+    await setReminders(env, chatId, l.filter((x) => !(x.at === last.at && x.text === last.text)));
+    await sendText(env, chatId, "↩️ 撤了刚才那个提醒。");
+  } else if (last.kind === "tpl") {
+    const t = await getTpls(env, chatId);
+    delete t[last.name];
+    await kvPut(env, `tpl:${chatId}`, JSON.stringify(t));
+    await sendText(env, chatId, `↩️ 删了模板「${last.name}」。`);
+  } else {
+    await sendText(env, chatId, "↩️ 撤销了上一步。");
+  }
+}
+
+// --- 关键词直答 ---
+async function serverStatusText() {
+  try {
+    const r = await fetch(STATUS_URL);
+    if (!r.ok) throw new Error("http " + r.status);
+    const s = await r.json();
+    const ok = (b) => (b ? "✅ 正常" : "🔴 异常");
+    const age = Math.floor(Date.now() / 1000) - s.ts;
+    return [
+      "🖥️ 服务器状态（洛杉矶 · 你的机场）",
+      `机场 sing-box：${ok(s.singbox)} · 去广告 DNS：${ok(s.adguard)} · 订阅服务：${ok(s.dqsub)}`,
+      `本月流量：${s.total_gb} GB / 2000 GB（${(s.total_gb / 20).toFixed(1)}%）`,
+      `磁盘 ${s.disk_pct}% · 内存 ${s.mem_pct}% · 负载 ${s.load1}`,
+      `已连续运行 ${s.uptime_days} 天 · 数据 ${age < 90 ? "刚刚" : Math.floor(age / 60) + " 分钟前"}更新`,
+    ].join(NL);
+  } catch (e) {
+    return "服务器状态我暂时读不到（状态接口没响应）。你喊 Algo 本人查，他能直接上服务器看。";
+  }
+}
+function countdownText() {
+  const now = new Date(Date.now() + 8 * 3600 * 1000);
+  const days = (y, m, d) => Math.round((Date.UTC(y, m - 1, d) - Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())) / 86400000);
+  return [
+    "⏳ 倒计时",
+    `🎂 你的 17 岁生日（1月31日）：还有 ${days(2027, 1, 31)} 天`,
+    `🧧 过年（2月6日大年初一）：还有 ${days(2027, 2, 6)} 天，除夕是 2月5日`,
+    `📶 宝可梦机场到期（12月1日）：还有 ${days(2026, 12, 1)} 天`,
+    `🖥️ VPS 到期（2027年11月8日）：还有 ${days(2027, 11, 8)} 天`,
+  ].join(NL);
+}
+async function tryIntent(env, chatId, userId, text, threadId) {
+  const t = String(text || "").trim();
+  if (t.startsWith("/")) return false;
+  if (t.length <= 20 && /过年|春节|除夕/.test(t)) {
+    await sendText(env, chatId, countdownText(), undefined, undefined, false, threadId);
+    return true;
+  }
+  if (t.length <= 16 && /倒计时|还有多久|还有多少天/.test(t)) {
+    await sendText(env, chatId, countdownText(), undefined, undefined, false, threadId);
+    return true;
+  }
+  if (t.length <= 20 && /(服务器|vps|机场|节点)/i.test(t) && /(状态|怎么样|如何|活着|流量|到期|正常)/.test(t)) {
+    await sendText(env, chatId, await serverStatusText(), undefined, undefined, false, threadId);
+    return true;
+  }
+  if (/^(用量|token用量|查用量)$/i.test(t)) {
+    await sendText(env, chatId, await usageText(env, chatId), undefined, MENU_KB);
+    return true;
+  }
+  if (t === "面板" || t === "高级面板") {
+    await sendPanel(env, chatId, userId);
+    return true;
+  }
+  return false;
+}
+
 // ---------- v6.4 设置面板 ----------
 function settingsKb(auto) {
   return {
@@ -1909,8 +2211,17 @@ async function checkWatchLines(env, chatId) {
 async function briefingText(env, chatId) {
   const base = await composeBriefing();
   if (!chatId) return base;
+  const parts = [base];
+  try {
+    const todos = (await getTodos(env, chatId)).filter((x) => !x.done);
+    const ds = cstDayStart(Date.now());
+    const today = todos.filter((x) => x.due && x.due < ds + 86400000);
+    if (today.length) parts.push("", "✅ 今日待办:", ...today.slice(0, 5).map((x) => `· ${x.text}`));
+    else if (todos.length) parts.push("", `✅ 待办还有 ${todos.length} 件未完成（/todos 看）`);
+  } catch {}
   const wl = await checkWatchLines(env, chatId);
-  return wl.length ? [base, "", ...wl].join(NL) : base;
+  if (wl.length) parts.push("", ...wl);
+  return parts.join(NL);
 }
 
 // ---------- v5: 人设与记忆的展示 ----------
@@ -2271,7 +2582,7 @@ function keepTyping(env, chatId, action, threadId) {
 
 async function ensureBotCommands(env) {
   try {
-    if (await kvGet(env, "sys:cmdset8")) return;
+    if (await kvGet(env, "sys:cmdset9")) return;
     await tg(env, "setMyCommands", {
       commands: [
         { command: "start", description: "🏠 打开菜单" },
@@ -2296,10 +2607,15 @@ async function ensureBotCommands(env) {
         { command: "settings", description: "⚙️ 设置面板 (大脑/温度/长度/预算)" },
         { command: "usage", description: "📈 用量与费用" },
         { command: "temp", description: "🌡️ 创造性, 例: /temp 0.7" },
+        { command: "bill", description: "🧾 账本 (发 午饭35 也能记)" },
+        { command: "todo", description: "✅ 加待办, 例: /todo 周五前交报告" },
+        { command: "todos", description: "📋 待办清单" },
+        { command: "notes", description: "📝 我的备忘录" },
+        { command: "undo", description: "↩️ 撤销上一步" },
         { command: "myid", description: "🆔 我的数字 ID" },
       ],
     });
-    await kvPut(env, "sys:cmdset8", "1", 604800);
+    await kvPut(env, "sys:cmdset9", "1", 604800);
   } catch (e) {
     console.log("cmdset err", e);
   }
@@ -2490,6 +2806,18 @@ async function handleCallback(env, cq) {
       return;
     }
     await setBrain(env, chatId, brain);
+  } else if (data.startsWith("td:")) {
+    const parts = data.split(":");
+    const act = parts[1];
+    const id = parts[2];
+    const list = await getTodos(env, chatId);
+    const it = list.find((x) => x.id === id);
+    if (it) {
+      if (act === "done") it.done = true;
+      if (act === "del") list.splice(list.indexOf(it), 1);
+      await setTodos(env, chatId, list);
+    }
+    await sendTodos(env, chatId, cq.message?.message_id);
   } else if (data.startsWith("st:")) {
     await handleSettingsCallback(env, cq, chatId);
   }
@@ -3077,6 +3405,143 @@ async function handleUpdate(env, update) {
     );
     return;
   }
+  if (text.startsWith("/bill")) {
+    const arg = text.slice("/bill".length).trim();
+    const list = await getBills(env, chatId);
+    if (!list.length) {
+      await sendText(env, chatId, "🧾 还没记过账。直接在聊天里发「午饭35」我就记上了；收入发「收入100 备注」。");
+      return;
+    }
+    let out = await billText(env, chatId);
+    if (arg.includes("点评")) {
+      const s = billSums(list, Date.now());
+      try {
+        const c = await quickComplete(env, "你是一个说话直接的记账点评员，用一两句口语点评主人的花钱情况，给一个具体的小建议，不说教、不啰嗦。", `本月支出 ¥${s.m.toFixed(2)}，本周 ¥${s.w.toFixed(2)}，今日 ¥${s.d.toFixed(2)}，本月收入 ¥${s.inc.toFixed(2)}，分类：${Object.entries(s.cats).map(([k, v]) => `${k} ¥${v.toFixed(2)}`).join("，")}`);
+        out += NL + NL + "💬 " + c;
+      } catch {}
+    }
+    await sendText(env, chatId, out, undefined, MENU_KB);
+    return;
+  }
+  if (text.startsWith("/todos")) {
+    await sendTodos(env, chatId);
+    return;
+  }
+  if (text.startsWith("/todo")) {
+    const arg = text.slice("/todo".length).trim();
+    if (!arg) { await sendTodos(env, chatId); return; }
+    const p = parseDue(arg);
+    const list = await getTodos(env, chatId);
+    const it = { id: uid(), text: p.text || arg, due: p.due, done: false, ts: Date.now() };
+    list.push(it);
+    await setTodos(env, chatId, list);
+    await pushUndo(env, chatId, { kind: "todo", id: it.id });
+    await sendText(env, chatId, `✅ 待办记上了：${it.text}${it.due ? `（${fmtTimeCst(it.due)}）` : ""}${NL}发 /todos 看全部，点按钮能标完成。`);
+    return;
+  }
+  if (text.startsWith("/notes")) {
+    const kw = text.slice("/notes".length).trim();
+    const list = await getNotes(env, chatId);
+    if (!list.length) {
+      await sendText(env, chatId, "📝 备忘录是空的。发 /note 内容 就能记。");
+      return;
+    }
+    const hits = (kw ? list.filter((n) => n.text.includes(kw)) : list).slice(-10).reverse();
+    if (!hits.length) {
+      await sendText(env, chatId, `没找到带「${kw}」的备忘。`);
+      return;
+    }
+    await sendText(env, chatId, [`📝 备忘录${kw ? `（搜「${kw}」）` : ""}，共 ${list.length} 条:`, ...hits.map((n, i) => `${i + 1}. ${n.text}（${new Date(n.ts + 8 * 3600 * 1000).toISOString().slice(5, 10)}）`)].join(NL), undefined, MENU_KB);
+    return;
+  }
+  if (text.startsWith("/note")) {
+    const arg = text.slice("/note".length).trim();
+    if (!arg) {
+      await sendText(env, chatId, "格式：/note 要记的内容。看备忘发 /notes，搜备忘发 /notes 关键词。");
+      return;
+    }
+    const it = await addNote(env, chatId, arg);
+    await sendText(env, chatId, `📝 记下了：${it.text}${NL}发 /notes 随时翻，/undo 能撤销。`);
+    return;
+  }
+  if (text.startsWith("/save")) {
+    const arg = text.slice("/save".length).trim();
+    const sp = arg.indexOf(" ");
+    if (sp < 1) {
+      await sendText(env, chatId, "格式：/save 名字 模板内容。比如 /save 夸我 用三句话夸夸我，要真诚");
+      return;
+    }
+    const name = arg.slice(0, sp).slice(0, 12);
+    const content = arg.slice(sp + 1).trim();
+    const tpls = await getTpls(env, chatId);
+    tpls[name] = content;
+    await kvPut(env, `tpl:${chatId}`, JSON.stringify(tpls));
+    await pushUndo(env, chatId, { kind: "tpl", name });
+    await sendText(env, chatId, `💾 模板「${name}」存好了。发 /use ${name} 就能用，/tpls 看全部。`);
+    return;
+  }
+  if (text.startsWith("/tpls")) {
+    const tpls = await getTpls(env, chatId);
+    const names = Object.keys(tpls);
+    await sendText(env, chatId, names.length ? `💾 我的模板：${names.join("、")}${NL}发 /use 名字 调用。` : "还没有模板。发 /save 名字 内容 存一个。");
+    return;
+  }
+  if (text === "/use" || text.startsWith("/use ")) {
+    const arg = text.slice("/use".length).trim();
+    const sp = arg.indexOf(" ");
+    const name = sp < 0 ? arg : arg.slice(0, sp);
+    const extra = sp < 0 ? "" : arg.slice(sp + 1).trim();
+    const tpls = await getTpls(env, chatId);
+    if (!name || !tpls[name]) {
+      await sendText(env, chatId, `没找到这个模板。现有：${Object.keys(tpls).join("、") || "（空）"}。发 /tpls 看全部。`);
+      return;
+    }
+    const phId = await sendPlaceholder(env, chatId, "💭 小多正在按模板干活…", msg.message_id, threadId);
+    try {
+      const prompt = tpls[name] + (extra ? `${NL}补充材料/要求：${extra}` : "");
+      const reply = await aiChat(env, chatId, prompt, `（用了模板「${name}」）`, { memKey });
+      await deliverAiReply(env, chatId, phId, reply, text);
+    } catch (e) {
+      await editOrSend(env, chatId, phId, chatErrorText(e), undefined, false);
+    }
+    return;
+  }
+  if (text.startsWith("/undo")) {
+    await doUndo(env, chatId);
+    return;
+  }
+  {
+    const quickMap = [
+      ["/tr", "你是翻译官：输入是中文就译成自然英文，是英文或其他语言就译成中文。只输出译文，不要任何解释。"],
+      ["/sum", "把用户给的文本总结成 3 到 5 个要点，中文，简洁直接，只输出要点。"],
+      ["/fix", "修正下面文本的错别字、标点和明显语病，只输出修正后的全文，不要解释，保持原意和语气。"],
+      ["/en", "把用户给的中文翻译成自然地道的英文，只输出英文译文。"],
+    ];
+    let quickHit = null;
+    for (const [cmd, sys] of quickMap) {
+      if (text === cmd || text.startsWith(cmd + " ")) { quickHit = { cmd, sys }; break; }
+    }
+    if (quickHit) {
+      let input = text.slice(quickHit.cmd.length).trim();
+      if (!input && msg.reply_to_message && msg.reply_to_message.text) input = msg.reply_to_message.text;
+      if (!input) {
+        if (quickHit.cmd !== "/tr") {
+          await sendText(env, chatId, `格式：${quickHit.cmd} 要处理的内容，或者引用一条消息再发 ${quickHit.cmd}。`);
+          return;
+        }
+        // 裸 /tr 落回原有翻译模式 (后面的处理器)
+      } else {
+        const phId = await sendPlaceholder(env, chatId, "✍️ 小多处理中…", msg.message_id, threadId);
+        try {
+          const out = await quickComplete(env, quickHit.sys, input.slice(0, 4000));
+          await editOrSend(env, chatId, phId, out, undefined, false);
+        } catch (e) {
+          await editOrSend(env, chatId, phId, "处理失败了，再试一次。", undefined, false);
+        }
+        return;
+      }
+    }
+  }
   if (text.startsWith("/settings")) {
     await sendSettings(env, chatId);
     return;
@@ -3146,14 +3611,15 @@ async function handleUpdate(env, update) {
   }
   if (text === "/remind" || text.startsWith("/remind ")) {
     const arg = text.slice("/remind".length).trim();
-    const parsed = parseRemind(arg);
+    const parsed = parseRemind2(arg);
     if (!parsed) {
-      await sendText(env, chatId, `格式: /remind 30分钟后 喝水, 或者 /remind 20:30 交作业${NL}支持 分钟/小时/天 和 几点几分 两种写法, 内容跟在后面。`);
+      await sendText(env, chatId, `格式: /remind 30分钟后 喝水, 或者 /remind 20:30 交作业${NL}支持 分钟后、几点几分、明天9点这种写法, 内容跟在后面; 聊天里直接说「提醒我…」也行。`);
       return;
     }
     const list = await getReminders(env, chatId);
     list.push(parsed);
     await setReminders(env, chatId, list);
+    await pushUndo(env, chatId, { kind: "remind", at: parsed.at, text: parsed.text });
     await sendText(env, chatId, `好, ${fmtTimeCst(parsed.at)} 我提醒你: ${parsed.text}${NL}(我每 15 分钟看一眼表, 可能晚几分钟, 别拿它卡秒。)`);
     return;
   }
@@ -3477,6 +3943,40 @@ async function handleUpdate(env, update) {
   if (songAsk) {
     await doMusicSearch(env, chatId, userId, songAsk, msg.message_id, threadId);
     return;
+  }
+
+  // v6.5 关键词直答 + 聊天记账/提醒/待办 (不烧 AI 额度)
+  if (await tryIntent(env, chatId, userId, text, threadId)) return;
+  {
+    const remMatch = text.match(/^提醒我\s*(.+)$/);
+    if (remMatch) {
+      const p = parseRemind2(remMatch[1]);
+      if (p) {
+        const list = await getReminders(env, chatId);
+        list.push(p);
+        await setReminders(env, chatId, list);
+        await pushUndo(env, chatId, { kind: "remind", at: p.at, text: p.text });
+        await sendText(env, chatId, `好，${fmtTimeCst(p.at)} 我提醒你：${p.text}`, undefined, undefined, false, threadId);
+        return;
+      }
+    }
+    const billHit = parseBillChat(text);
+    if (billHit) {
+      const it = await addBill(env, chatId, billHit.amt, billHit.note, billHit.income);
+      const s = billSums(await getBills(env, chatId), Date.now());
+      await sendText(env, chatId, `🧾 记上了：${billHit.income ? "收入" : it.cat} ${billHit.note} ¥${billHit.amt}${NL}今日支出 ¥${s.d.toFixed(2)} · 本月支出 ¥${s.m.toFixed(2)}${NL}发 /bill 看账本，/undo 撤销这笔。`, undefined, undefined, false, threadId);
+      return;
+    }
+    const todoHit = parseTodoChat(text);
+    if (todoHit) {
+      const list = await getTodos(env, chatId);
+      const it = { id: uid(), text: todoHit.text, due: todoHit.due, done: false, ts: Date.now() };
+      list.push(it);
+      await setTodos(env, chatId, list);
+      await pushUndo(env, chatId, { kind: "todo", id: it.id });
+      await sendText(env, chatId, `✅ 待办记上了：${it.text}${it.due ? `（${fmtTimeCst(it.due)}）` : ""}。发 /todos 看全部。`, undefined, undefined, false, threadId);
+      return;
+    }
   }
 
   if (!(await quotaTake(env, userId))) {
