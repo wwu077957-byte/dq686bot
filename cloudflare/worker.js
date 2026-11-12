@@ -213,7 +213,7 @@ const PERSONA_KB = {
 };
 
 const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20", "cfai", "openrouter", "mistral", "polli"];
-const VERSION = "v6.8";
+const VERSION = "v6.8.1";
 
 // ---------- v6.4 设置 (温度/长度/预算) ----------
 function monthKey() {
@@ -420,7 +420,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v6.8)", {
+      return new Response("dq686bot is alive (cloudflare worker v6.8.1)", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
@@ -687,6 +687,100 @@ TelegramWidget.request('refresh').then(function(a){apply(a)},function(e){});
 if(TelegramWidget.ready)TelegramWidget.ready();
 </script>`;
 
+const PANEL_LITE = `<style>
+body{margin:0;font-family:-apple-system,sans-serif}
+.hd{background:linear-gradient(125deg,#0f3d2e,#1F6B52 55%,#37916f);border-radius:18px;padding:15px;color:#fff;position:relative;overflow:hidden}
+.hd:after{content:'';position:absolute;right:-30px;top:-30px;width:110px;height:110px;border-radius:50%;background:rgba(255,255,255,.09)}
+.logo{width:42px;height:42px;border-radius:13px;background:rgba(255,255,255,.16);display:flex;align-items:center;justify-content:center;font-size:21px;float:left;margin-right:11px}
+.tt{font-size:17px;font-weight:700;letter-spacing:.5px;line-height:42px}
+.sub{display:flex;gap:8px;clear:both;padding-top:11px;font-size:12px}
+.sub span{background:rgba(255,255,255,.14);border-radius:999px;padding:4px 10px}
+.bar{height:6px;border-radius:99px;background:var(--tg-theme-secondary-bg-color);margin:11px 1px 5px;overflow:hidden}
+.fill{height:100%;border-radius:99px;background:linear-gradient(90deg,#1F6B52,#34a853)}
+.barlb{display:flex;justify-content:space-between;font-size:11px;color:var(--tg-theme-hint-color);margin:0 1px 10px}
+.cny{background:linear-gradient(125deg,#6d0f0f,#991b1b 50%,#c02626);border-radius:18px;padding:14px;color:#fff;margin-bottom:10px;position:relative;overflow:hidden}
+.cny:after{content:'🧧';position:absolute;right:8px;top:2px;font-size:52px;opacity:.16}
+.cny .lb{font-size:12px;letter-spacing:3px;opacity:.85}
+.cny .row{display:flex;align-items:baseline;gap:6px;margin-top:3px}
+.cny b{font-size:38px;color:#fcd34d;line-height:1}
+.cny .hms{font-size:13px;opacity:.92;margin-top:5px;letter-spacing:1px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+button{border:0;border-radius:15px;padding:13px 6px;font-size:15px;font-weight:600;background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-text-color)}
+button:active{opacity:.55}
+.main{background:linear-gradient(125deg,#14532d,#1F6B52);color:#fff}
+.wide{width:100%;margin-top:8px}
+.msg{text-align:center;font-size:13px;color:var(--tg-theme-hint-color);min-height:18px;padding-top:8px}
+</style>
+<div class="hd"><div class="logo">✨</div><div class="tt">小多 · 高级面板</div>
+<div class="sub"><span id="dt"></span><span id="wx"></span></div></div>
+<div id="home">
+<div class="bar"><div class="fill" id="fill"></div></div>
+<div class="barlb"><span id="c2"></span><span id="c3"></span></div>
+<div class="barlb"><span id="cB"></span></div>
+<div class="cny"><div class="lb">距 离 过 年</div><div class="row"><b id="cny">--</b><span>天 · 大年初一</span></div><div class="hms" id="hms"></div></div>
+<div class="grid">
+<button class="main" id="bBrief">☀️ 今日早报</button>
+<button id="bMusic">🎵 点歌</button>
+<button id="bPersona">🎭 换人设</button>
+<button id="bNew">🆕 新话题</button>
+</div>
+</div>
+<div id="persona" style="display:none">
+<div class="grid" id="plist"></div>
+<button class="wide" id="bBack">↩️ 返回面板</button>
+</div>
+<div class="msg" id="msg"></div>
+<script>
+var S={};
+var PS=[['default','😎 小多本人'],['coder','👨‍💻 代码助手'],['story','📖 故事编剧'],['translator','🌐 翻译官'],['roast','😏 毒舌损友']];
+function parse(s){try{return JSON.parse(s||'{}')}catch(e){return{}}}
+function pad(n){return (n<10?'0':'')+n}
+function tick(){
+ if(!S.cnts)return;
+ var diff=Math.floor(S.cnts-Date.now()/1000);
+ if(diff<0)diff=0;
+ var d=Math.floor(diff/86400),h=Math.floor(diff%86400/3600),m=Math.floor(diff%3600/60),s=diff%60;
+ document.getElementById('cny').textContent=d;
+ document.getElementById('hms').textContent='还剩 '+h+' 小时 '+m+' 分 '+pad(s)+' 秒';
+}
+function draw(read){
+ if(read)S=parse(TelegramWidget.chatData);
+ document.getElementById('dt').textContent='🗓 '+(S.dt||'');
+ var wx=document.getElementById('wx');
+ if(S.wx){wx.textContent='🌤 '+S.wx;wx.style.display=''}else{wx.style.display='none'}
+ document.getElementById('c2').textContent='🎭 当前人设 · '+(S.pn||'小多本人');
+ document.getElementById('c3').textContent='今日额度 '+(S.use||0)+'/'+(S.mx||100);
+ document.getElementById('cB').textContent='🧠 当前模型 · '+(S.br||'');
+ var pct=Math.min(100,Math.round((S.use||0)/(S.mx||100)*100));
+ document.getElementById('fill').style.width=pct+'%';
+ document.getElementById('cny').textContent=(S.cny==null?'--':S.cny);
+ tick();
+ var per=(S.pg==='persona');
+ document.getElementById('home').style.display=per?'none':'block';
+ document.getElementById('persona').style.display=per?'block':'none';
+ if(per){
+  var htm='';
+  for(var i=0;i<PS.length;i++)htm+='<button data-ps="'+PS[i][0]+'">'+PS[i][1]+'</button>';
+  document.getElementById('plist').innerHTML=htm;
+  var bs=document.querySelectorAll('[data-ps]');
+  for(var j=0;j<bs.length;j++)bs[j].onclick=function(){say('换好啦 🎭');req('ps:'+this.getAttribute('data-ps'))};
+ }
+}
+function say(t){document.getElementById('msg').textContent=t||''}
+function apply(a){if(a&&a.result){var n=parse(a.result);if(n&&(n.pg||n.pn)){S=n;draw(false)}}}
+function req(d){TelegramWidget.request(d).then(function(a){apply(a)},function(e){say('出错了, 再点一次试试')})}
+document.getElementById('bBrief').onclick=function(){say('早报在下面 👇');req('act:brief')};
+document.getElementById('bMusic').onclick=function(){say('在下面直接发歌名就行 🎵');req('act:music')};
+document.getElementById('bPersona').onclick=function(){req('pg:persona')};
+document.getElementById('bNew').onclick=function(){say('记忆清空啦, 重新聊 🆕');req('act:new')};
+document.getElementById('bBack').onclick=function(){req('pg:home')};
+if(TelegramWidget.onEvent)TelegramWidget.onEvent('chatDataChanged',function(){draw(true)});
+draw(true);
+setInterval(tick,1000);
+TelegramWidget.request('refresh').then(function(a){apply(a)},function(e){});
+if(TelegramWidget.ready)TelegramWidget.ready();
+</script>`;
+
 async function panelState(env, chatId, userId, pg) {
   const personaId = (await kvGet(env, `persona:${chatId}`)) || "default";
   const brainLabel = brainConfig(env, await getBrain(env, chatId)).label;
@@ -780,10 +874,18 @@ async function sendPanel(env, chatId, userId) {
     allow_queries: true,
     caption: "✨ 小多高级面板 · 卡片里的按钮都能点",
   });
-  if (!r || !r.ok) {
-    console.log("sendWidget failed", r && r.description);
-    await sendText(env, chatId, "高级面板没打开 (TG 版本可能太旧), 先用经典菜单 👇", undefined, MENU_KB);
-  }
+  if (r && r.ok) return;
+  console.log("sendWidget full failed", r && r.description);
+  const r2 = await tg(env, "sendWidget", {
+    chat_id: chatId,
+    html: PANEL_LITE,
+    chat_data: st,
+    allow_queries: true,
+    caption: "✨ 小多高级面板（简洁版）",
+  });
+  if (r2 && r2.ok) return;
+  console.log("sendWidget lite failed", r2 && r2.description);
+  await sendText(env, chatId, `高级面板没打开，TG 给的原因：${(r2 && r2.description) || (r && r.description) || "未知"}。先用经典菜单 👇`, undefined, MENU_KB);
 }
 
 async function handleWidgetQuery(env, wq) {
@@ -1724,7 +1826,7 @@ async function brainCooled(env, id) {
 
 
 // ---------- v6.7: backup/habit/diary/quiet/follow/health/changelog ----------
-const RELEASE_NOTE = "大脑池扩容：新增 Workers AI 和 Pollinations 兜底（都免费），OpenRouter、Mistral 接口备好（注册填 key 就亮）；语音转写和画图都加了备胎，一个挂了自动换下一个";
+const RELEASE_NOTE = "修高级面板打不开的问题（面板太胖被 TG 拒了，加了简洁版兜底）";
 function cstDateStr(ts) {
   return new Date(ts + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
