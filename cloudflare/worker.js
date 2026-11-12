@@ -83,6 +83,7 @@ const HELP = `我是小多, 多情的私人 AI 助手。
 /save 名字 内容 - 💾 存提示词模板; /use 名字 - 调用模板
 /tr /sum /fix /en 内容 - 翻译/总结/改错字/转英文 (也可引用消息)
 /undo - ↩️ 撤销上一步 (记账/待办/备忘/提醒/模板)
+/pin 内容 - 📌 钉住一条重要信息, 每轮聊天都带着; /unpin 取消
 关键词直答: 问「还有多久过年」「服务器状态」「用量」直接秒回, 不烧额度
 
 点菜单按钮也能办大部分事, 不用记命令。输入框下面还有一排常驻按钮; 直接给我发贴纸, 我会学会, 聊天对上心情时也会回你一张。`;
@@ -201,7 +202,7 @@ const PERSONA_KB = {
 };
 
 const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20"];
-const VERSION = "v6.5";
+const VERSION = "v6.6";
 
 // ---------- v6.4 设置 (温度/长度/预算) ----------
 function monthKey() {
@@ -392,6 +393,8 @@ async function buildSystem(env, chatId, brainLabel) {
       lines.push("关于主人的长期记忆 (回答时自然参考, 不要主动复述, 除非正好相关):");
       prefs.slice(0, 30).forEach((p, i) => lines.push(`${i + 1}. ${p}`));
     }
+    const pin = await kvGet(env, `pin:${chatId}`);
+    if (pin) lines.push(`主人钉住的重要信息 (每一轮都要记牢): ${pin}`);
   }
   return lines.join(NL);
 }
@@ -403,7 +406,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v6.5)", {
+      return new Response("dq686bot is alive (cloudflare worker v6.6)", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
@@ -448,6 +451,9 @@ body{margin:0;font-family:-apple-system,sans-serif}
 .tt{font-size:17px;font-weight:700;letter-spacing:.5px;line-height:42px}
 .sub{display:flex;gap:8px;clear:both;padding-top:11px;font-size:12px}
 .sub span{background:rgba(255,255,255,.14);border-radius:999px;padding:4px 10px}
+.tabs{display:flex;gap:6px;margin:10px 0}
+.tabs button{flex:1;padding:9px 2px;font-size:13px;border-radius:12px}
+.tabs button.on{background:linear-gradient(125deg,#14532d,#1F6B52);color:#fff}
 .bar{height:6px;border-radius:99px;background:var(--tg-theme-secondary-bg-color);margin:11px 1px 5px;overflow:hidden}
 .fill{height:100%;border-radius:99px;background:linear-gradient(90deg,#1F6B52,#34a853)}
 .barlb{display:flex;justify-content:space-between;font-size:11px;color:var(--tg-theme-hint-color);margin:0 1px 10px}
@@ -463,9 +469,30 @@ button:active{opacity:.55}
 .main{background:linear-gradient(125deg,#14532d,#1F6B52);color:#fff}
 .wide{width:100%;margin-top:8px}
 .msg{text-align:center;font-size:13px;color:var(--tg-theme-hint-color);min-height:18px;padding-top:8px}
+.card{background:var(--tg-theme-secondary-bg-color);border-radius:15px;padding:12px;margin-bottom:8px;font-size:14px}
+.crow{display:flex;align-items:center;gap:8px;font-size:13px;margin:7px 0}
+.cbar{flex:1;height:8px;border-radius:99px;background:rgba(127,127,127,.25);overflow:hidden}
+.cbar i{display:block;height:100%;background:linear-gradient(90deg,#1F6B52,#34a853)}
+.ubar i{background:linear-gradient(90deg,#2563eb,#38bdf8)}
+.trow{display:flex;align-items:center;gap:8px;background:var(--tg-theme-secondary-bg-color);border-radius:13px;padding:10px;margin-bottom:7px;font-size:14px}
+.trow .tx{flex:1}
+.trow .due{font-size:11px;color:var(--tg-theme-hint-color)}
+.trow button{padding:7px 10px;font-size:13px;border-radius:10px}
+input.tin{width:100%;box-sizing:border-box;padding:12px;border-radius:13px;border:1px solid rgba(127,127,127,.4);font-size:15px;margin-bottom:8px;background:transparent;color:var(--tg-theme-text-color)}
+.opt{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:6px}
+.opt button{padding:10px 4px;font-size:13px;border-radius:12px}
+.opt button.on{background:linear-gradient(125deg,#14532d,#1F6B52);color:#fff}
+.lb2{font-size:12px;color:var(--tg-theme-hint-color);margin:9px 1px 5px}
+.big{font-size:16px;font-weight:700}
 </style>
 <div class="hd"><div class="logo">✨</div><div class="tt">小多 · 高级面板</div>
 <div class="sub"><span id="dt"></span><span id="wx"></span></div></div>
+<div class="tabs">
+<button data-tab="home">🏠 今日</button>
+<button data-tab="bill">🧾 记账</button>
+<button data-tab="todo">✅ 待办</button>
+<button data-tab="set">⚙️ 设置</button>
+</div>
 <div id="home">
 <div class="bar"><div class="fill" id="fill"></div></div>
 <div class="barlb"><span id="c2"></span><span id="c3"></span></div>
@@ -482,6 +509,51 @@ button:active{opacity:.55}
 <div class="grid" id="plist"></div>
 <button class="wide" id="bBack">↩️ 返回面板</button>
 </div>
+<div id="bill" style="display:none">
+<div class="card"><span class="big" id="bM"></span><div id="bDW" style="margin-top:5px;font-size:13px"></div></div>
+<div class="lb2">本月分类</div>
+<div class="card" id="cats"></div>
+<div class="lb2">近 7 天 token 用量</div>
+<div class="card" id="u7"></div>
+<div class="lb2">最近记账</div>
+<div class="card" id="brec"></div>
+</div>
+<div id="todo" style="display:none">
+<input class="tin" id="tdin" placeholder="输入待办, 比如: 周五前交报告">
+<button class="wide main" id="tdadd" style="margin:0 0 10px">➕ 添加待办</button>
+<div id="tdlist"></div>
+<div class="msg" id="tdmsg"></div>
+</div>
+<div id="set" style="display:none">
+<div class="lb2">🧠 大脑</div>
+<div class="opt" id="sbrains">
+<button data-wsb="deepseek">🧠 DeepSeek</button>
+<button data-wsb="deepseek-pro">🤔 深度思考</button>
+<button data-wsb="gptoss">⚡ GPT-OSS 120B</button>
+<button data-wsb="gptoss20">🚀 GPT-OSS 20B</button>
+</div>
+<button class="wide" id="wsauto">🤖 智能选模型</button>
+<div class="lb2">🌡️ 温度</div>
+<div class="opt">
+<button data-wst="0.3">0.3 严谨</button>
+<button data-wst="0.7">0.7 日常</button>
+<button data-wst="1.2">1.2 放飞</button>
+</div>
+<div class="lb2">📏 回复长度上限</div>
+<div class="opt">
+<button data-wsm="800">短 800</button>
+<button data-wsm="2000">中 2000</button>
+<button data-wsm="4000">长 4000</button>
+<button data-wsm="0">不限</button>
+</div>
+<div class="lb2">💰 月 token 预算</div>
+<div class="opt">
+<button data-wsbg="0">关</button>
+<button data-wsbg="100000">10万</button>
+<button data-wsbg="500000">50万</button>
+<button data-wsbg="1000000">100万</button>
+</div>
+</div>
 <div class="msg" id="msg"></div>
 <script>
 var S={};
@@ -496,6 +568,7 @@ function tick(){
  document.getElementById('cny').textContent=d;
  document.getElementById('hms').textContent='还剩 '+h+' 小时 '+m+' 分 '+pad(s)+' 秒';
 }
+function esc(t){return String(t||'').replace(/</g,'&lt;')}
 function draw(read){
  if(read)S=parse(TelegramWidget.chatData);
  document.getElementById('dt').textContent='🗓 '+(S.dt||'');
@@ -508,25 +581,77 @@ function draw(read){
  document.getElementById('fill').style.width=pct+'%';
  document.getElementById('cny').textContent=(S.cny==null?'--':S.cny);
  tick();
- var per=(S.pg==='persona');
- document.getElementById('home').style.display=per?'none':'block';
- document.getElementById('persona').style.display=per?'block':'none';
- if(per){
+ var cur=S.pg||'home';
+ var pages=['home','persona','bill','todo','set'];
+ for(var i=0;i<pages.length;i++)document.getElementById(pages[i]).style.display=(pages[i]===cur)?'block':'none';
+ var tab=(cur==='persona')?'home':cur;
+ var tabs=document.querySelectorAll('[data-tab]');
+ for(var t2=0;t2<tabs.length;t2++)tabs[t2].className=(tabs[t2].getAttribute('data-tab')===tab)?'on':'';
+ if(cur==='persona'){
   var htm='';
-  for(var i=0;i<PS.length;i++)htm+='<button data-ps="'+PS[i][0]+'">'+PS[i][1]+'</button>';
+  for(var i2=0;i2<PS.length;i2++)htm+='<button data-ps="'+PS[i2][0]+'">'+PS[i2][1]+'</button>';
   document.getElementById('plist').innerHTML=htm;
   var bs=document.querySelectorAll('[data-ps]');
   for(var j=0;j<bs.length;j++)bs[j].onclick=function(){say('换好啦 🎭');req('ps:'+this.getAttribute('data-ps'))};
+ }
+ if(cur==='bill'&&S.bl){
+  document.getElementById('bM').textContent='本月支出 ¥'+S.bl.m;
+  document.getElementById('bDW').textContent='今日 ¥'+S.bl.d+' · 本周 ¥'+S.bl.w+' · 本月收入 ¥'+S.bl.inc;
+  var ch='';
+  for(var c=0;c<S.bl.cats.length;c++)ch+='<div class="crow"><span style="width:38px">'+esc(S.bl.cats[c][0])+'</span><span class="cbar"><i style="width:'+S.bl.cats[c][2]+'%"></i></span><span>¥'+S.bl.cats[c][1]+'</span></div>';
+  document.getElementById('cats').innerHTML=ch||'本月还没记账';
+  var uh='';
+  for(var u=0;u<(S.u7||[]).length;u++)uh+='<div class="crow"><span style="width:38px">'+S.u7[u][0]+'</span><span class="cbar ubar"><i style="width:'+S.u7[u][2]+'%"></i></span><span>'+S.u7[u][1]+'</span></div>';
+  document.getElementById('u7').innerHTML=uh||'暂无数据';
+  var rh='';
+  for(var r2=0;r2<(S.bl.rec||[]).length;r2++)rh+='<div class="crow"><span style="flex:1">'+esc(S.bl.rec[r2][0])+'</span><span>'+S.bl.rec[r2][1]+'</span></div>';
+  document.getElementById('brec').innerHTML=rh||'暂无';
+ }
+ if(cur==='todo'){
+  var th='';
+  var list=S.td||[];
+  for(var d=0;d<list.length;d++)th+='<div class="trow"><span class="tx">'+esc(list[d][1])+(list[d][2]?'<div class="due">'+list[d][2]+'</div>':'')+'</span><button data-tdd="'+list[d][0]+'">✅</button><button data-tdx="'+list[d][0]+'">❌</button></div>';
+  document.getElementById('tdlist').innerHTML=th||'<div class="card">没有未完成的待办 🎉</div>';
+  document.getElementById('tdmsg').textContent=(S.tdt!=null)?('未完成 '+S.tdt+' 件 · 已完成 '+(S.tdn||0)+' 件'):'';
+  var db=document.querySelectorAll('[data-tdd]');
+  for(var d2=0;d2<db.length;d2++)db[d2].onclick=function(){req('tdd:'+this.getAttribute('data-tdd'))};
+  var xb=document.querySelectorAll('[data-tdx]');
+  for(var d3=0;d3<xb.length;d3++)xb[d3].onclick=function(){req('tdx:'+this.getAttribute('data-tdx'))};
+ }
+ if(cur==='set'&&S.st){
+  var bb=document.querySelectorAll('[data-wsb]');
+  for(var b=0;b<bb.length;b++)bb[b].className=(bb[b].getAttribute('data-wsb')===S.st.brid)?'on':'';
+  var au=document.getElementById('wsauto');
+  au.textContent='🤖 智能选模型：'+(S.st.auto?'开':'关');
+  au.className='wide'+(S.st.auto?' main':'');
+  var tb=document.querySelectorAll('[data-wst]');
+  for(var b2=0;b2<tb.length;b2++)tb[b2].className=(parseFloat(tb[b2].getAttribute('data-wst'))===S.st.temp)?'on':'';
+  var mb=document.querySelectorAll('[data-wsm]');
+  for(var b3=0;b3<mb.length;b3++)mb[b3].className=(parseInt(mb[b3].getAttribute('data-wsm'),10)===(S.st.max||0))?'on':'';
+  var gb=document.querySelectorAll('[data-wsbg]');
+  for(var b4=0;b4<gb.length;b4++)gb[b4].className=(parseInt(gb[b4].getAttribute('data-wsbg'),10)===(S.st.budget||0))?'on':'';
  }
 }
 function say(t){document.getElementById('msg').textContent=t||''}
 function apply(a){if(a&&a.result){var n=parse(a.result);if(n&&(n.pg||n.pn)){S=n;draw(false)}}}
 function req(d){TelegramWidget.request(d).then(function(a){apply(a)},function(e){say('出错了, 再点一次试试')})}
+var tabs2=document.querySelectorAll('[data-tab]');
+for(var q=0;q<tabs2.length;q++)tabs2[q].onclick=function(){req('pg:'+this.getAttribute('data-tab'))};
 document.getElementById('bBrief').onclick=function(){say('早报在下面 👇');req('act:brief')};
 document.getElementById('bMusic').onclick=function(){say('在下面直接发歌名就行 🎵');req('act:music')};
 document.getElementById('bPersona').onclick=function(){req('pg:persona')};
 document.getElementById('bNew').onclick=function(){say('记忆清空啦, 重新聊 🆕');req('act:new')};
 document.getElementById('bBack').onclick=function(){req('pg:home')};
+document.getElementById('tdadd').onclick=function(){var v=document.getElementById('tdin').value.replace(/^\s+|\s+$/g,'');if(!v){say('先输入待办内容');return}document.getElementById('tdin').value='';say('加上啦 ✅');req('tda:'+encodeURIComponent(v))};
+document.getElementById('wsauto').onclick=function(){req('wsa')};
+var wb=document.querySelectorAll('[data-wsb]');
+for(var w=0;w<wb.length;w++)wb[w].onclick=function(){say('大脑切换中 🧠');req('wsb:'+this.getAttribute('data-wsb'))};
+var wt=document.querySelectorAll('[data-wst]');
+for(var w2=0;w2<wt.length;w2++)wt[w2].onclick=function(){req('wst:'+this.getAttribute('data-wst'))};
+var wm=document.querySelectorAll('[data-wsm]');
+for(var w3=0;w3<wm.length;w3++)wm[w3].onclick=function(){req('wsm:'+this.getAttribute('data-wsm'))};
+var wg=document.querySelectorAll('[data-wsbg]');
+for(var w4=0;w4<wg.length;w4++)wg[w4].onclick=function(){req('wsbg:'+this.getAttribute('data-wsbg'))};
 if(TelegramWidget.onEvent)TelegramWidget.onEvent('chatDataChanged',function(){draw(true)});
 draw(true);
 setInterval(tick,1000);
@@ -564,7 +689,7 @@ async function panelState(env, chatId, userId, pg) {
     } catch {}
   }
   const cnts = Math.floor((cny >= 0 ? Date.UTC(2027, 1, 6) : Date.UTC(2028, 0, 26)) / 1000) - 8 * 3600;
-  return JSON.stringify({
+  const out = {
     pg: pg || "home",
     pn: (PERSONAS[personaId] || PERSONAS.default).label,
     br: brainLabel + (autoOn ? " · 智能选" : ""),
@@ -574,7 +699,48 @@ async function panelState(env, chatId, userId, pg) {
     mx: PER_USER_DAILY,
     dt,
     wx,
-  });
+  };
+  if (pg === "bill") {
+    try {
+      const list = await getBills(env, chatId);
+      const s = billSums(list, Date.now());
+      const cats = Object.entries(s.cats).sort((a, b) => b[1] - a[1]).slice(0, 5);
+      const cmx = cats.length ? cats[0][1] : 1;
+      out.bl = {
+        d: s.d.toFixed(2), w: s.w.toFixed(2), m: s.m.toFixed(2), inc: s.inc.toFixed(2),
+        cats: cats.map(([k, v]) => [k, v.toFixed(2), Math.max(4, Math.round((v / cmx) * 100))]),
+        rec: list.slice(-5).reverse().map((b) => [b.note, (b.inc ? "+" : "-") + "¥" + b.amt]),
+      };
+      const u7 = [];
+      for (let i = 6; i >= 0; i--) {
+        const dkey = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+        const tk = await readTok(env, `tokd:${dkey}`);
+        u7.push([dkey.slice(5), tk.i + tk.o]);
+      }
+      const umx = Math.max(1, ...u7.map((x) => x[1]));
+      out.u7 = u7.map(([l, v]) => [l, v, v ? Math.max(4, Math.round((v / umx) * 100)) : 0]);
+    } catch {}
+  }
+  if (pg === "todo") {
+    try {
+      const list = await getTodos(env, chatId);
+      const open = list.filter((x) => !x.done).sort((a, b) => (a.due || 9e15) - (b.due || 9e15));
+      out.td = open.slice(0, 8).map((x) => [x.id, x.text, x.due ? fmtTimeCst(x.due) : ""]);
+      out.tdn = list.length - open.length;
+      out.tdt = open.length;
+    } catch {}
+  }
+  if (pg === "set") {
+    try {
+      const st2 = await getSettings(env, chatId);
+      out.st = {
+        brid: (await kvGet(env, `brain:${chatId}`)) || "",
+        auto: (await kvGet(env, `auto:${chatId}`)) === "1" ? 1 : 0,
+        temp: st2.temp, max: st2.max || 0, budget: st2.budget,
+      };
+    } catch {}
+  }
+  return JSON.stringify(out);
 }
 
 async function sendPanel(env, chatId, userId) {
@@ -605,8 +771,59 @@ async function handleWidgetQuery(env, wq) {
   try {
     if (data === "refresh") {
       await answer(await panelState(env, chatId, userId, "home"));
-    } else if (data === "pg:persona" || data === "pg:home") {
-      const st = await panelState(env, chatId, userId, data === "pg:persona" ? "persona" : "home");
+    } else if (data.startsWith("pg:")) {
+      const want = data.slice(3);
+      const pg = ["home", "persona", "bill", "todo", "set"].includes(want) ? want : "home";
+      const st = await panelState(env, chatId, userId, pg);
+      await tg(env, "editMessageWidgetData", { chat_id: chatId, message_id: wq.message_id, chat_data: st });
+      await answer(st);
+    } else if (data.startsWith("tda:")) {
+      const txt = decodeURIComponent(data.slice(4)).trim();
+      if (txt) {
+        const p = parseDue(txt);
+        const list = await getTodos(env, chatId);
+        const it = { id: uid(), text: p.text || txt, due: p.due, done: false, ts: Date.now() };
+        list.push(it);
+        await setTodos(env, chatId, list);
+        await pushUndo(env, chatId, { kind: "todo", id: it.id });
+      }
+      const st = await panelState(env, chatId, userId, "todo");
+      await tg(env, "editMessageWidgetData", { chat_id: chatId, message_id: wq.message_id, chat_data: st });
+      await answer(st);
+    } else if (data.startsWith("tdd:") || data.startsWith("tdx:")) {
+      const id = data.slice(4);
+      const list = await getTodos(env, chatId);
+      const it = list.find((x) => x.id === id);
+      if (it) {
+        if (data.startsWith("tdd:")) it.done = true;
+        else list.splice(list.indexOf(it), 1);
+        await setTodos(env, chatId, list);
+      }
+      const st = await panelState(env, chatId, userId, "todo");
+      await tg(env, "editMessageWidgetData", { chat_id: chatId, message_id: wq.message_id, chat_data: st });
+      await answer(st);
+    } else if (data.startsWith("wsb:")) {
+      const target = data.slice(4);
+      if (BRAIN_IDS.includes(target) && brainConfig(env, target).key) {
+        await kvPut(env, `brain:${chatId}`, target);
+        if (env.BOT_KV) await env.BOT_KV.delete(`eco:${chatId}`);
+      }
+      const st = await panelState(env, chatId, userId, "set");
+      await tg(env, "editMessageWidgetData", { chat_id: chatId, message_id: wq.message_id, chat_data: st });
+      await answer(st);
+    } else if (data === "wsa") {
+      const cur = (await kvGet(env, `auto:${chatId}`)) === "1";
+      await kvPut(env, `auto:${chatId}`, cur ? "0" : "1");
+      const st = await panelState(env, chatId, userId, "set");
+      await tg(env, "editMessageWidgetData", { chat_id: chatId, message_id: wq.message_id, chat_data: st });
+      await answer(st);
+    } else if (data.startsWith("wst:") || data.startsWith("wsm:") || data.startsWith("wsbg:")) {
+      const st0 = await getSettings(env, chatId);
+      if (data.startsWith("wst:")) st0.temp = parseFloat(data.slice(4));
+      else if (data.startsWith("wsm:")) { const n = parseInt(data.slice(4), 10); st0.max = n > 0 ? n : null; }
+      else st0.budget = parseInt(data.slice(5), 10) || 0;
+      await saveSettings(env, chatId, st0);
+      const st = await panelState(env, chatId, userId, "set");
       await tg(env, "editMessageWidgetData", { chat_id: chatId, message_id: wq.message_id, chat_data: st });
       await answer(st);
     } else if (data.startsWith("ps:")) {
@@ -625,6 +842,7 @@ async function handleWidgetQuery(env, wq) {
     } else if (data === "act:new") {
       await answer();
       if (env.BOT_KV) await env.BOT_KV.delete(`mem:${chatId}`);
+      if (env.BOT_KV) await env.BOT_KV.delete(`sum:${chatId}`);
     } else {
       await answer();
     }
@@ -885,6 +1103,10 @@ async function getBrain(env, chatId) {
   const eco = await kvGet(env, `eco:${chatId}`);
   if (eco && eco === monthKey() && brainConfig(env, "gptoss20").key) return "gptoss20";
   const saved = await kvGet(env, `brain:${chatId}`);
+  if (saved && BRAIN_IDS.includes(saved) && (await brainCooled(env, saved))) {
+    const alt = BRAIN_IDS.find((id) => id !== saved && brainConfig(env, id).key);
+    if (alt) return alt;
+  }
   if (BRAIN_IDS.includes(saved) && brainConfig(env, saved).key) return saved;
   if (env.DEEPSEEK_API_KEY) return "deepseek";
   return "gptoss";
@@ -941,6 +1163,9 @@ async function aiChat(env, chatId, userText, historyText, opts = {}) {
   });
   let data = null;
   if (!r.ok) {
+    if (r.status === 402 || r.status === 429) {
+      try { await kvPut(env, `cool:${cfg.id}`, String(Date.now()), 3600); } catch {}
+    }
     const altId = ["gptoss", "deepseek", "gptoss20", "deepseek-pro"].find((id) => id !== cfg.id && brainConfig(env, id).key);
     if (altId && r.status !== 401 && r.status !== 402) {
       const alt = brainConfig(env, altId);
@@ -1309,6 +1534,11 @@ async function sendBlocksAsFiles(env, chatId, blocks) {
 // AI 回复的统一交付: 有代码块就挂文件按钮; 说了"文件"或代码太长就直接发文件
 async function deliverAiReply(env, chatId, phId, reply, userText) {
   const blocks = extractBlocks(reply);
+  if (!blocks.length && reply.length > 3600) {
+    await editOrSend(env, chatId, phId, reply.slice(0, 500) + `${NL}${NL}📄 (全文 ${reply.length} 字太长了, 存成文件发你, 点开看全文)`, undefined, true);
+    await sendDocument(env, chatId, reply, "reply.md", "📄 全文");
+    return;
+  }
   if (blocks.length) {
     await kvPut(env, `lastcode:${chatId}`, JSON.stringify(blocks), 60 * 60);
     const wantFile = (userText || "").includes("文件");
@@ -1357,6 +1587,47 @@ async function setBrain(env, chatId, brain) {
 }
 
 
+
+
+// ---------- v6.6 小件: 卡号校验/每日一句/接口冷却 ----------
+function luhnOk(s) {
+  let sum = 0;
+  let alt = false;
+  for (let i = s.length - 1; i >= 0; i--) {
+    let n = s.charCodeAt(i) - 48;
+    if (n < 0 || n > 9) return false;
+    if (alt) { n *= 2; if (n > 9) n -= 9; }
+    sum += n;
+    alt = !alt;
+  }
+  return sum % 10 === 0;
+}
+const DAILY_LINES = [
+  "冷知识：章鱼有三颗心脏，两颗给鳃，一颗给全身。",
+  "冷知识：蜂蜜放几千年都不会变质，考古挖出来的还能吃。",
+  "一句话：把简单的事做到极致，就是不简单。",
+  "冷知识：打喷嚏时眼睛会不自觉闭上，是身体的保护机制。",
+  "一句话：今天多走的每一步，都是给明天的自己省力气。",
+  "冷知识：香蕉和人的 DNA 有约 60% 相似。",
+  "一句话：想做的事别等有空，空是挤出来的。",
+  "冷知识：闪电的温度比太阳表面还高，约三万度。",
+  "一句话：钱要花在能长本事和能省时间的地方。",
+  "冷知识：考拉每天要睡 20 小时，是睡眠界的冠军。",
+  "一句话：记录本身就是一种进步，账记得越细，心里越有数。",
+  "冷知识：互联网一分钟大约有 5 亿条消息被发出去。",
+  "一句话：不怕慢，就怕站。",
+  "冷知识：金鱼的记忆不止 7 秒，能记三个月。",
+];
+function dailyLine() {
+  const now = new Date(Date.now() + 8 * 3600 * 1000);
+  const start = Date.UTC(now.getUTCFullYear(), 0, 0);
+  const doy = Math.floor((now.getTime() - start) / 86400000);
+  return DAILY_LINES[doy % DAILY_LINES.length];
+}
+async function brainCooled(env, id) {
+  const t = parseInt((await kvGet(env, `cool:${id}`)) || "0", 10);
+  return t > 0 && Date.now() - t < 10 * 60 * 1000;
+}
 
 // ---------- v6.5 生活组: 记账/待办/备忘/模板 + 关键词直答 ----------
 const STATUS_URL = "https://104.168.92.194.sslip.io:8444/duoqing/status-cd9b3ebfde.json";
@@ -2219,6 +2490,13 @@ async function briefingText(env, chatId) {
     if (today.length) parts.push("", "✅ 今日待办:", ...today.slice(0, 5).map((x) => `· ${x.text}`));
     else if (todos.length) parts.push("", `✅ 待办还有 ${todos.length} 件未完成（/todos 看）`);
   } catch {}
+  try {
+    const bills = await getBills(env, chatId);
+    const ds = cstDayStart(Date.now());
+    const y = bills.filter((b) => !b.inc && b.ts >= ds - 86400000 && b.ts < ds).reduce((a, b) => a + b.amt, 0);
+    if (y > 0) parts.push(`💰 昨天花了 ¥${y.toFixed(2)}`);
+  } catch {}
+  parts.push("", "💡 " + dailyLine());
   const wl = await checkWatchLines(env, chatId);
   if (wl.length) parts.push("", ...wl);
   return parts.join(NL);
@@ -2582,7 +2860,7 @@ function keepTyping(env, chatId, action, threadId) {
 
 async function ensureBotCommands(env) {
   try {
-    if (await kvGet(env, "sys:cmdset9")) return;
+    if (await kvGet(env, "sys:cmdset10")) return;
     await tg(env, "setMyCommands", {
       commands: [
         { command: "start", description: "🏠 打开菜单" },
@@ -2612,10 +2890,11 @@ async function ensureBotCommands(env) {
         { command: "todos", description: "📋 待办清单" },
         { command: "notes", description: "📝 我的备忘录" },
         { command: "undo", description: "↩️ 撤销上一步" },
+        { command: "pin", description: "📌 钉住一条重要信息" },
         { command: "myid", description: "🆔 我的数字 ID" },
       ],
     });
-    await kvPut(env, "sys:cmdset9", "1", 604800);
+    await kvPut(env, "sys:cmdset10", "1", 604800);
   } catch (e) {
     console.log("cmdset err", e);
   }
@@ -3014,6 +3293,11 @@ async function doToolGen(env, chatId, userId, wish, replyTo) {
 
 // ---------- 消息处理 ----------
 async function handleUpdate(env, update) {
+  if (update.update_id != null && env.BOT_KV) {
+    const dk = `dup:${update.update_id}`;
+    if (await kvGet(env, dk)) return;
+    await kvPut(env, dk, "1", 120);
+  }
   const uid0 = update.widget_query?.from?.id || update.callback_query?.from?.id || update.message?.from?.id || update.channel_post?.from?.id;
   if (uid0 != null && (await isAllowed(env, uid0))) await ensureBotCommands(env);
   if (update.stopped_message_generation) {
@@ -3542,6 +3826,22 @@ async function handleUpdate(env, update) {
       }
     }
   }
+  if (text.startsWith("/pin")) {
+    const arg = text.slice("/pin".length).trim();
+    if (!arg) {
+      const cur = await kvGet(env, `pin:${chatId}`);
+      await sendText(env, chatId, cur ? `📌 当前钉住的：${cur}${NL}发 /unpin 取消，/pin 新内容 覆盖。` : "还没有钉住的信息。发 /pin 内容 就能钉一条，比如 /pin 我在福州，喜欢吃辣");
+      return;
+    }
+    await kvPut(env, `pin:${chatId}`, arg.slice(0, 300));
+    await sendText(env, chatId, `📌 钉好了，以后每轮聊天我都记着：${arg.slice(0, 300)}`);
+    return;
+  }
+  if (text.startsWith("/unpin")) {
+    if (env.BOT_KV) await env.BOT_KV.delete(`pin:${chatId}`);
+    await sendText(env, chatId, "📌 取消钉住了。");
+    return;
+  }
   if (text.startsWith("/settings")) {
     await sendSettings(env, chatId);
     return;
@@ -3959,6 +4259,11 @@ async function handleUpdate(env, update) {
         await sendText(env, chatId, `好，${fmtTimeCst(p.at)} 我提醒你：${p.text}`, undefined, undefined, false, threadId);
         return;
       }
+    }
+    const cardDigits = text.replace(/[\s-]/g, "");
+    if (/^\d{15,19}$/.test(cardDigits) && luhnOk(cardDigits)) {
+      await sendText(env, chatId, "⚠️ 停一下：这串数字看着像银行卡号。别在聊天里发明文卡号，不安全，我也不会存它。真怕忘，就记个提示（比如「卡在手机备忘录里」），别记号码本身。", undefined, undefined, false, threadId);
+      return;
     }
     const billHit = parseBillChat(text);
     if (billHit) {
