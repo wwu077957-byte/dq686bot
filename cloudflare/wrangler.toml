@@ -11,7 +11,7 @@ compatibility_date = "2025-01-01"
 
 [vars]
 AI_MODEL = "openai/gpt-oss-120b"
-ALLOWED_IDS = "8362330268"
+ALLOWED_IDS = "8362330268,8809731280"
 
 [[kv_namespaces]]
 binding = "BOT_KV"
