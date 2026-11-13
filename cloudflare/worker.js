@@ -213,7 +213,7 @@ const PERSONA_KB = {
 };
 
 const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20", "cfai", "openrouter", "mistral", "polli"];
-const VERSION = "v6.8.1";
+const VERSION = "v6.8.2";
 
 // ---------- v6.4 设置 (温度/长度/预算) ----------
 function monthKey() {
@@ -1826,7 +1826,7 @@ async function brainCooled(env, id) {
 
 
 // ---------- v6.7: backup/habit/diary/quiet/follow/health/changelog ----------
-const RELEASE_NOTE = "修高级面板打不开的问题（面板太胖被 TG 拒了，加了简洁版兜底）";
+const RELEASE_NOTE = "服务器状态能看两台机场了（服务器1 主力 + 服务器2 备用），问我「服务器状态」试试";
 function cstDateStr(ts) {
   return new Date(ts + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
@@ -2233,13 +2233,25 @@ async function serverStatusText() {
     const s = await r.json();
     const ok = (b) => (b ? "✅ 正常" : "🔴 异常");
     const age = Math.floor(Date.now() / 1000) - s.ts;
-    return [
-      "🖥️ 服务器状态（洛杉矶 · 你的机场）",
+    const lines = [
+      "🖥️ 服务器1（主力机场 · 洛杉矶）",
       `机场 sing-box：${ok(s.singbox)} · 去广告 DNS：${ok(s.adguard)} · 订阅服务：${ok(s.dqsub)}`,
       `本月流量：${s.total_gb} GB / 2000 GB（${(s.total_gb / 20).toFixed(1)}%）`,
       `磁盘 ${s.disk_pct}% · 内存 ${s.mem_pct}% · 负载 ${s.load1}`,
       `已连续运行 ${s.uptime_days} 天 · 数据 ${age < 90 ? "刚刚" : Math.floor(age / 60) + " 分钟前"}更新`,
-    ].join(NL);
+    ];
+    if (s.srv2) {
+      lines.push("");
+      if (s.srv2.online) {
+        lines.push("🛰️ 服务器2（备用机场 · 洛杉矶小机）");
+        lines.push(`机场 sing-box：${ok(s.srv2.singbox)}`);
+        lines.push(`磁盘 ${s.srv2.disk_pct}% · 内存 ${s.srv2.mem_pct}% · 负载 ${s.srv2.load1}`);
+        lines.push("余额按小时扣，约用到 2027 年 1 月中旬");
+      } else {
+        lines.push("🛰️ 服务器2（备用机场）：🔴 暂时联系不上");
+      }
+    }
+    return lines.join(NL);
   } catch (e) {
     return "服务器状态我暂时读不到（状态接口没响应）。你喊 Algo 本人查，他能直接上服务器看。";
   }
