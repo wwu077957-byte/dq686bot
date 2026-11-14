@@ -210,7 +210,7 @@ const PERSONA_KB = {
 };
 
 const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20", "cfai", "amd", "openrouter", "mistral", "polli"];
-const VERSION = "v6.8.5";
+const VERSION = "v6.8.6";
 
 // ---------- v6.4 设置 (温度/长度/预算) ----------
 function monthKey() {
@@ -1220,6 +1220,8 @@ async function brainFetch(env, cfg, body) {
   }
 }
 
+const AMD_MODELS = ["DeepSeek-V4.1-Flash", "DeepSeek-V4-Flash", "Qwen3.8-27B", "MiMo-V2.6-Flash"];
+
 function brainConfig(env, brain) {
   const dsBase = (env.DEEPSEEK_BASE_URL || "https://api.deepseek.com").replace(/\/+$/, "");
   const gqBase = "https://api.groq.com/openai/v1";
@@ -1292,6 +1294,7 @@ async function aiChat(env, chatId, userText, historyText, opts = {}) {
   }
   if (!brain) brain = await getBrain(env, chatId);
   let cfg = brainConfig(env, brain);
+  if (opts && opts.modelOverride) cfg = { ...cfg, model: opts.modelOverride };
   let fellBack = false;
   if (!cfg.key) {
     const order = ["deepseek", "gptoss", "cfai", "gptoss20", "amd", "openrouter", "mistral", "polli", "deepseek-pro"];
@@ -1329,7 +1332,17 @@ async function aiChat(env, chatId, userText, historyText, opts = {}) {
     if (res.status === 402 || res.status === 429) {
       try { await kvPut(env, `cool:${cfg.id}`, String(Date.now()), 3600); } catch {}
     }
-    if (res.status !== 401 && res.status !== 402) {
+    if (cfg.id === "amd") {
+      for (const m of AMD_MODELS) {
+        if (m === cfg.model) continue;
+        const c2 = { ...cfg, model: m };
+        try {
+          const r3 = await brainFetch(env, c2, await chatBody(env, chatId, c2, messages, false));
+          if (r3.ok) { data = r3.data; cfg = c2; break; }
+        } catch {}
+      }
+    }
+    if (!data && res.status !== 401 && res.status !== 402) {
       const altOrder = ["gptoss", "cfai", "deepseek", "gptoss20", "amd", "openrouter", "mistral", "deepseek-pro", "polli"];
       for (const altId of altOrder) {
         if (altId === cfg.id) continue;
@@ -1393,6 +1406,7 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
   }
   if (!brain) brain = await getBrain(env, chatId);
   let cfg = brainConfig(env, brain);
+  if (opts && opts.modelOverride) cfg = { ...cfg, model: opts.modelOverride };
   let fellBack = false;
   if (!cfg.key) {
     const order = ["deepseek", "gptoss", "cfai", "gptoss20", "amd", "openrouter", "mistral", "polli", "deepseek-pro"];
@@ -1431,6 +1445,16 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
     body: JSON.stringify(await chatBody(env, chatId, cfg, messages, true)),
   });
   if (!r.ok || !r.body) {
+    if (cfg.id === "amd" && r.status !== 401 && r.status !== 402) {
+      for (const m of AMD_MODELS) {
+        if (m === cfg.model) continue;
+        try {
+          const reply3 = await aiChat(env, chatId, userText, historyText, { ...(opts || {}), brain: "amd", modelOverride: m });
+          if (onPartial) { try { await onPartial(reply3); } catch {} }
+          return reply3;
+        } catch {}
+      }
+    }
     const altId = ["gptoss", "cfai", "deepseek", "gptoss20", "amd", "openrouter", "mistral", "polli"].find((id) => id !== cfg.id && brainConfig(env, id).key);
     if (altId && r.status !== 401 && r.status !== 402) {
       const reply2 = await aiChat(env, chatId, userText, historyText, { ...(opts || {}), brain: altId });
@@ -1760,9 +1784,14 @@ function chatErrorText(e) {
 async function sendModelPicker(env, chatId) {
   const brain = await getBrain(env, chatId);
   const label = brainConfig(env, brain).label;
+  let lastNote = "";
+  try {
+    const lj = JSON.parse((await kvGet(env, `last:${chatId}`)) || "null");
+    if (lj && lj.brain && lj.brain !== brain) lastNote = `（上一句它没接上，实际回答的是 ${brainConfig(env, lj.brain).label}）`;
+  } catch {}
   const st = (id) => (brainConfig(env, id).key ? "已接入" : "未接入");
   const text = [
-    `当前大脑: ${label}`,
+    `当前大脑: ${label}${lastNote}`,
     "",
     `🧠 DeepSeek 日常 (${st("deepseek")}) - 中文强, 快问快答`,
     `🤔 DeepSeek 深度思考 (${st("deepseek-pro")}) - 难题慢慢想, 用同一份余额`,
@@ -1826,7 +1855,7 @@ async function brainCooled(env, id) {
 
 
 // ---------- v6.7: backup/habit/diary/quiet/follow/health/changelog ----------
-const RELEASE_NOTE = "按多情要求下线话题功能：小多恢复一条干净对话，记忆合并回主线（旧话题记忆封存、没删）；菜单和键盘里的话题入口都撤了，界面更清爽";
+const RELEASE_NOTE = "修复 AMD 假切换：AMD 主模型忙时先在本池里换 V4-Flash/Qwen/MiMo 接着答；/model 里会如实标注上一句到底是谁回答的，不再偷偷换人";
 function cstDateStr(ts) {
   return new Date(ts + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
