@@ -210,7 +210,7 @@ const PERSONA_KB = {
 };
 
 const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20", "cfai", "amd", "openrouter", "mistral", "polli"];
-const VERSION = "v6.8.7";
+const VERSION = "v6.8.8";
 
 // ---------- v6.4 设置 (温度/长度/预算) ----------
 function monthKey() {
@@ -1134,8 +1134,8 @@ async function deliverStreamReply(env, chatId, reply, userText, quoteOpts, threa
   const sent = await sendRich(env, chatId, reply, undefined, quoteOpts, threadId);
   if (!sent) await sendText(env, chatId, reply, undefined, undefined, true, threadId);
   const wantFile = (userText || "").includes("文件");
-  const huge = blocks.some((b) => b.code.length > 3000);
-  if (blocks.length && (wantFile || huge)) await sendBlocksAsFiles(env, chatId, blocks);
+  const fileBlocks = wantFile ? blocks : blocks.filter((b) => b.code.length >= 200);
+  if (fileBlocks.length) await sendBlocksAsFiles(env, chatId, fileBlocks);
   await maybeFollowups(env, chatId, userText, reply, threadId);
 }
 
@@ -1785,13 +1785,9 @@ async function deliverAiReply(env, chatId, phId, reply, userText) {
   if (blocks.length) {
     await kvPut(env, `lastcode:${chatId}`, JSON.stringify(blocks), 60 * 60);
     const wantFile = (userText || "").includes("文件");
-    const huge = blocks.some((b) => b.code.length > 3000);
-    if (wantFile || huge) {
-      await editOrSend(env, chatId, phId, reply, undefined, true);
-      await sendBlocksAsFiles(env, chatId, blocks);
-      return;
-    }
+    const fileBlocks = wantFile ? blocks : blocks.filter((b) => b.code.length >= 200);
     await editOrSend(env, chatId, phId, reply, undefined, true);
+    if (fileBlocks.length) await sendBlocksAsFiles(env, chatId, fileBlocks);
     return;
   }
   await editOrSend(env, chatId, phId, reply, undefined, true);
@@ -1880,7 +1876,7 @@ async function brainCooled(env, id) {
 
 
 // ---------- v6.7: backup/habit/diary/quiet/follow/health/changelog ----------
-const RELEASE_NOTE = "提速+防消失：所有大脑请求都加了超时（首字 12 秒、断流 20 秒、普通请求 20 秒），卡住就自动换下一个大脑，不再出现想半天不回话";
+const RELEASE_NOTE = "写文件双交付：回复里的代码除了能点着复制，成型的代码块（200 字以上，或你说了要文件时全部）还会一并存成文件发你，跟 Lumi 一样";
 function cstDateStr(ts) {
   return new Date(ts + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
