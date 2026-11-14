@@ -151,6 +151,7 @@ const MODEL_KB = {
       { text: "🔀 OpenRouter", callback_data: "b:openrouter" },
       { text: "🇫🇷 Mistral", callback_data: "b:mistral" },
     ],
+    [{ text: "🖥️ AMD 免费池", callback_data: "b:amd" }],
     [{ text: "↩️ 返回菜单", callback_data: "m:menu" }],
   ],
 };
@@ -212,8 +213,8 @@ const PERSONA_KB = {
   ],
 };
 
-const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20", "cfai", "openrouter", "mistral", "polli"];
-const VERSION = "v6.8.3";
+const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20", "cfai", "amd", "openrouter", "mistral", "polli"];
+const VERSION = "v6.8.4";
 
 // ---------- v6.4 设置 (温度/长度/预算) ----------
 function monthKey() {
@@ -559,6 +560,7 @@ input.tin{width:100%;box-sizing:border-box;padding:12px;border-radius:13px;borde
 <button data-wsb="polli">🌸 Pollinations</button>
 <button data-wsb="openrouter">🔀 OpenRouter</button>
 <button data-wsb="mistral">🇫🇷 Mistral</button>
+<button data-wsb="amd">🖥️ AMD 免费池</button>
 </div>
 <button class="wide" id="wsauto">🤖 智能选模型</button>
 <div class="lb2">🌡️ 温度</div>
@@ -1258,6 +1260,8 @@ function brainConfig(env, brain) {
       return { id: "openrouter", label: "OpenRouter 免费池", base: "https://openrouter.ai/api/v1", model: env.OPENROUTER_MODEL || "meta-llama/llama-3.3-70b-instruct:free", key: env.OPENROUTER_KEY || "" };
     case "mistral":
       return { id: "mistral", label: "Mistral (免费档)", base: "https://api.mistral.ai/v1", model: env.MISTRAL_MODEL || "mistral-small-latest", key: env.MISTRAL_KEY || "" };
+    case "amd":
+      return { id: "amd", label: "AMD 免费池 · DeepSeek V4", base: "https://developer.amd.com.cn/radeon/api/v1", model: env.AMD_MODEL || "DeepSeek-V4.1-Flash", key: env.AMD_KEY || "" };
     default:
       return {
         id: "gptoss",
@@ -1274,7 +1278,7 @@ async function getBrain(env, chatId) {
   if (eco && eco === monthKey() && brainConfig(env, "gptoss20").key) return "gptoss20";
   const saved = await kvGet(env, `brain:${chatId}`);
   if (saved && BRAIN_IDS.includes(saved) && (await brainCooled(env, saved))) {
-    const alt = ["gptoss", "gptoss20", "cfai", "openrouter", "mistral", "deepseek", "deepseek-pro", "polli"].find((id) => id !== saved && brainConfig(env, id).key);
+    const alt = ["gptoss", "gptoss20", "cfai", "amd", "openrouter", "mistral", "deepseek", "deepseek-pro", "polli"].find((id) => id !== saved && brainConfig(env, id).key);
     if (alt) return alt;
   }
   if (BRAIN_IDS.includes(saved) && brainConfig(env, saved).key) return saved;
@@ -1294,7 +1298,7 @@ async function aiChat(env, chatId, userText, historyText, opts = {}) {
   let cfg = brainConfig(env, brain);
   let fellBack = false;
   if (!cfg.key) {
-    const order = ["deepseek", "gptoss", "cfai", "gptoss20", "openrouter", "mistral", "polli", "deepseek-pro"];
+    const order = ["deepseek", "gptoss", "cfai", "gptoss20", "amd", "openrouter", "mistral", "polli", "deepseek-pro"];
     const altId = order.find((id) => id !== brain && brainConfig(env, id).key);
     if (altId) {
       brain = altId;
@@ -1330,7 +1334,7 @@ async function aiChat(env, chatId, userText, historyText, opts = {}) {
       try { await kvPut(env, `cool:${cfg.id}`, String(Date.now()), 3600); } catch {}
     }
     if (res.status !== 401 && res.status !== 402) {
-      const altOrder = ["gptoss", "cfai", "deepseek", "gptoss20", "openrouter", "mistral", "deepseek-pro", "polli"];
+      const altOrder = ["gptoss", "cfai", "deepseek", "gptoss20", "amd", "openrouter", "mistral", "deepseek-pro", "polli"];
       for (const altId of altOrder) {
         if (altId === cfg.id) continue;
         const alt = brainConfig(env, altId);
@@ -1395,7 +1399,7 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
   let cfg = brainConfig(env, brain);
   let fellBack = false;
   if (!cfg.key) {
-    const order = ["deepseek", "gptoss", "cfai", "gptoss20", "openrouter", "mistral", "polli", "deepseek-pro"];
+    const order = ["deepseek", "gptoss", "cfai", "gptoss20", "amd", "openrouter", "mistral", "polli", "deepseek-pro"];
     const altId = order.find((id) => id !== brain && brainConfig(env, id).key);
     if (altId) {
       brain = altId;
@@ -1431,7 +1435,7 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
     body: JSON.stringify(await chatBody(env, chatId, cfg, messages, true)),
   });
   if (!r.ok || !r.body) {
-    const altId = ["gptoss", "cfai", "deepseek", "gptoss20", "openrouter", "mistral", "polli"].find((id) => id !== cfg.id && brainConfig(env, id).key);
+    const altId = ["gptoss", "cfai", "deepseek", "gptoss20", "amd", "openrouter", "mistral", "polli"].find((id) => id !== cfg.id && brainConfig(env, id).key);
     if (altId && r.status !== 401 && r.status !== 402) {
       const reply2 = await aiChat(env, chatId, userText, historyText, { ...(opts || {}), brain: altId });
       if (onPartial) { try { await onPartial(reply2); } catch {} }
@@ -1481,7 +1485,7 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
   }
   reply = reply.trim();
   if (!reply) {
-    const altId = ["gptoss", "cfai", "deepseek", "gptoss20", "openrouter", "mistral", "polli"].find((id) => id !== cfg.id && brainConfig(env, id).key);
+    const altId = ["gptoss", "cfai", "deepseek", "gptoss20", "amd", "openrouter", "mistral", "polli"].find((id) => id !== cfg.id && brainConfig(env, id).key);
     if (altId) {
       const reply2 = await aiChat(env, chatId, userText, historyText, { ...(opts || {}), brain: altId });
       if (onPartial) { try { await onPartial(reply2); } catch {} }
@@ -1826,7 +1830,7 @@ async function brainCooled(env, id) {
 
 
 // ---------- v6.7: backup/habit/diary/quiet/follow/health/changelog ----------
-const RELEASE_NOTE = "服务器2 试了一圈下线了（线路延迟 300 多，太慢），机场恢复服务器1 一台主力；问我「服务器状态」看它就行";
+const RELEASE_NOTE = "新大脑到货：AMD 免费池（DeepSeek V4.1）已进 /model 和备用链，每天额度自动刷新；服务器状态读数也修好了，问我「服务器状态」就能看";
 function cstDateStr(ts) {
   return new Date(ts + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
@@ -2301,6 +2305,7 @@ function settingsKb(auto, st) {
         { text: "🔀 OpenRouter", callback_data: "st:brain:openrouter" },
         { text: "🇫🇷 Mistral", callback_data: "st:brain:mistral" },
       ],
+      [{ text: "🖥️ AMD 免费池", callback_data: "st:brain:amd" }],
       [{ text: `🤖 智能选模型：${auto ? "开" : "关"}`, callback_data: "st:auto" }],
       [
         { text: "🌡️ 温度 0.3", callback_data: "st:temp:0.3" },
