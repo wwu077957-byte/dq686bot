@@ -68,7 +68,6 @@ const HELP = `我是小多, 多情的私人 AI 助手。
 /panel - ✨ 高级面板 (消息里的小程序卡片)
 /model - 🧠 看当前用的哪个模型 / 换模型
 /tool - 🧩 现做一个消息里能点的小工具 (例: /tool AA分账计算器)
-/topics - 🧵 话题工作台 (一键建 工作/日常/灵感/临时 四个独立话题, 记忆互不串)
 /stickers - 🎴 我学会的贴纸 (直接发贴纸教我)
 /addpack - 🎴 整包添加表情包 (把 t.me/addstickers 链接直接发聊天里也行)
 /music 歌名 - 搜歌点歌 (点结果里的数字就发歌; 也可直接说 放+歌名)
@@ -114,10 +113,7 @@ const MENU_KB = {
       { text: "📝 我的记忆", callback_data: "m:memory" },
       { text: "❓ 帮助", callback_data: "m:help" },
     ],
-    [
-      { text: "🧵 话题", callback_data: "m:topics" },
-      { text: "🆔 我的ID", callback_data: "m:myid" },
-    ],
+    [{ text: "🆔 我的ID", callback_data: "m:myid" }],
   ],
 };
 
@@ -126,7 +122,7 @@ const REPLY_KB = {
   keyboard: [
     [{ text: "✨ 高级面板" }, { text: "🎵 点歌" }],
     [{ text: "🧠 当前模型" }, { text: "☀️ 今日早报" }],
-    [{ text: "🧵 话题" }, { text: "🎨 画图" }],
+    [{ text: "🎨 画图" }],
     [{ text: "🆕 新话题" }, { text: "❓ 帮助" }],
   ],
   resize_keyboard: true,
@@ -214,7 +210,7 @@ const PERSONA_KB = {
 };
 
 const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20", "cfai", "amd", "openrouter", "mistral", "polli"];
-const VERSION = "v6.8.4";
+const VERSION = "v6.8.5";
 
 // ---------- v6.4 设置 (温度/长度/预算) ----------
 function monthKey() {
@@ -1830,7 +1826,7 @@ async function brainCooled(env, id) {
 
 
 // ---------- v6.7: backup/habit/diary/quiet/follow/health/changelog ----------
-const RELEASE_NOTE = "新大脑到货：AMD 免费池（DeepSeek V4.1）已进 /model 和备用链，每天额度自动刷新；服务器状态读数也修好了，问我「服务器状态」就能看";
+const RELEASE_NOTE = "按多情要求下线话题功能：小多恢复一条干净对话，记忆合并回主线（旧话题记忆封存、没删）；菜单和键盘里的话题入口都撤了，界面更清爽";
 function cstDateStr(ts) {
   return new Date(ts + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
@@ -3268,7 +3264,7 @@ function keepTyping(env, chatId, action, threadId) {
 
 async function ensureBotCommands(env) {
   try {
-    if (await kvGet(env, "sys:cmdset11")) return;
+    if (await kvGet(env, "sys:cmdset12")) return;
     await tg(env, "setMyCommands", {
       commands: [
         { command: "start", description: "🏠 打开菜单" },
@@ -3280,7 +3276,6 @@ async function ensureBotCommands(env) {
         { command: "status", description: "📊 机器人状态" },
         { command: "panel", description: "✨ 高级面板" },
         { command: "tool", description: "🧩 现做一个小工具" },
-        { command: "topics", description: "🧵 话题工作台" },
         { command: "model", description: "🧠 当前模型 / 换模型" },
         { command: "persona", description: "🎭 换人设" },
         { command: "morning", description: "☀️ 今日早报" },
@@ -3305,7 +3300,7 @@ async function ensureBotCommands(env) {
         { command: "myid", description: "🆔 我的数字 ID" },
       ],
     });
-    await kvPut(env, "sys:cmdset11", "1", 604800);
+    await kvPut(env, "sys:cmdset12", "1", 604800);
   } catch (e) {
     console.log("cmdset err", e);
   }
@@ -3438,7 +3433,7 @@ async function handleCallback(env, cq) {
   } else if (data === "m:morning") {
     await sendText(env, chatId, await briefingText(env, chatId));
   } else if (data === "m:topics") {
-    await setupTopics(env, chatId, userId);
+    await sendText(env, chatId, "🧵 话题功能下线啦，小多现在就是一条干净对话，直接聊就行。");
   } else if (data === "m:myid") {
     await sendText(env, chatId, `你的 Telegram 数字 ID 是: ${userId}`);
   } else if (data === "f:file") {
@@ -3743,7 +3738,7 @@ async function handleUpdate(env, update) {
   let caption = (msg.caption || "").trim();
   const photos = msg.photo || [];
   const doc = msg.document || null;
-  const threadId = msg.is_topic_message && msg.message_thread_id ? msg.message_thread_id : null;
+  const threadId = null; // v6.8.5 话题下线：统一主对话（旧分话题记忆保留在 KV，未删）
   const memKey = threadId ? `mem:${chatId}:t${threadId}` : `mem:${chatId}`;
 
   if (text.startsWith("/myid")) {
@@ -3995,7 +3990,7 @@ async function handleUpdate(env, update) {
     return;
   }
   if (text.startsWith("/topics")) {
-    await setupTopics(env, chatId, userId);
+    await sendText(env, chatId, "🧵 话题功能下线啦，小多现在就是一条干净对话，直接聊就行。");
     return;
   }
   if (text.startsWith("/tool")) {
@@ -4612,8 +4607,7 @@ async function handleUpdate(env, update) {
       "🎵 点歌": "music",
       "🧠 当前模型": "model",
       "☀️ 今日早报": "morning",
-      "🧵 话题": "topics",
-      "🎨 画图": "draw",
+            "🎨 画图": "draw",
       "🆕 新话题": "new",
       "❓ 帮助": "help",
     }[text];
@@ -4635,7 +4629,7 @@ async function handleUpdate(env, update) {
       return;
     }
     if (kbAct === "topics") {
-      await setupTopics(env, chatId, userId);
+      await sendText(env, chatId, "🧵 话题功能下线啦，小多现在就是一条干净对话，直接聊就行。");
       return;
     }
     if (kbAct === "draw") {
