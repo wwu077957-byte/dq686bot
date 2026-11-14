@@ -210,7 +210,7 @@ const PERSONA_KB = {
 };
 
 const BRAIN_IDS = ["deepseek", "deepseek-pro", "gptoss", "gptoss20", "cfai", "amd", "openrouter", "mistral", "polli"];
-const VERSION = "v6.8.6";
+const VERSION = "v6.8.7";
 
 // ---------- v6.4 设置 (温度/长度/预算) ----------
 function monthKey() {
@@ -1207,16 +1207,21 @@ async function brainFetch(env, cfg, body) {
       return { ok: false, status: 0 };
     }
   }
+  const ctl = new AbortController();
+  const tmr = setTimeout(() => { try { ctl.abort(); } catch {} }, 20000);
   try {
     const r = await fetch(`${cfg.base}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.key}` },
       body: JSON.stringify(body),
+      signal: ctl.signal,
     });
     if (!r.ok) return { ok: false, status: r.status };
     return { ok: true, data: await r.json() };
   } catch (e) {
     return { ok: false, status: 0 };
+  } finally {
+    clearTimeout(tmr);
   }
 }
 
@@ -1439,11 +1444,21 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
     return reply2;
   }
   const t0 = Date.now();
-  const r = await fetch(`${cfg.base}/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.key}` },
-    body: JSON.stringify(await chatBody(env, chatId, cfg, messages, true)),
-  });
+  const ctl = new AbortController();
+  const hdrTmr = setTimeout(() => { try { ctl.abort(); } catch {} }, 12000);
+  let r;
+  try {
+    r = await fetch(`${cfg.base}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.key}` },
+      body: JSON.stringify(await chatBody(env, chatId, cfg, messages, true)),
+      signal: ctl.signal,
+    });
+  } catch (e) {
+    r = { ok: false, status: 0, body: null };
+  } finally {
+    clearTimeout(hdrTmr);
+  }
   if (!r.ok || !r.body) {
     if (cfg.id === "amd" && r.status !== 401 && r.status !== 402) {
       for (const m of AMD_MODELS) {
@@ -1472,7 +1487,17 @@ async function aiChatStream(env, chatId, userText, historyText, opts, onPartial)
   let reply = "";
   let lastPush = 0;
   for (;;) {
-    const { done, value } = await reader.read();
+    let rd;
+    try {
+      rd = await Promise.race([
+        reader.read(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("stall")), 20000)),
+      ]);
+    } catch {
+      try { await reader.cancel(); } catch {}
+      break;
+    }
+    const { done, value } = rd;
     if (done) break;
     buf += decoder.decode(value, { stream: true });
     const lines = buf.split(NL);
@@ -1855,7 +1880,7 @@ async function brainCooled(env, id) {
 
 
 // ---------- v6.7: backup/habit/diary/quiet/follow/health/changelog ----------
-const RELEASE_NOTE = "修复 AMD 假切换：AMD 主模型忙时先在本池里换 V4-Flash/Qwen/MiMo 接着答；/model 里会如实标注上一句到底是谁回答的，不再偷偷换人";
+const RELEASE_NOTE = "提速+防消失：所有大脑请求都加了超时（首字 12 秒、断流 20 秒、普通请求 20 秒），卡住就自动换下一个大脑，不再出现想半天不回话";
 function cstDateStr(ts) {
   return new Date(ts + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
