@@ -421,7 +421,7 @@ export default {
     const path = url.pathname.replace(/^\/+/, "");
 
     if (request.method === "GET" && (path === "" || path === "health")) {
-      return new Response("dq686bot is alive (cloudflare worker v6.8.1)", {
+      return new Response("dq686bot is alive (cloudflare worker " + VERSION + ")", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
       });
     }
